@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>発車ベル制御システム</title>
+  
+  <!-- 元サイトと同じシリアル通信用ライブラリ -->
+  <script src="https://mipsparc.github.io/webbuzzer/TibboWebSerial.js"></script>
+
   <style>
     :root {
       --primary-color: #2e7d32;
@@ -65,9 +69,9 @@
     }
 
     .btn:active { opacity: 0.8; }
-    .btn-connect { background-color: #e65100; color: white; }
-    .btn-manual-play { background-color: #0288d1; color: white; }
-    .btn-manual-stop { background-color: #d32f2f; color: white; }
+    .btn-connect { background-color: #2196f3; color: white; }
+    .btn-manual-play { background-color: #4caf50; color: white; }
+    .btn-manual-stop { background-color: #f44336; color: white; }
 
     .form-group {
       margin-bottom: 16px;
@@ -118,10 +122,10 @@
   <h1>発車ベル制御システム</h1>
 
   <div style="text-align: center;">
-    <span id="connectionStatus" class="status-badge status-disconnected">🔴 スイッチ：未接続</span>
+    <span id="connectStatus" class="status-badge status-disconnected">未接続</span>
   </div>
 
-  <button id="connectBtn" class="btn btn-connect">🔌 USBスイッチを接続する (WebUSB)</button>
+  <button id="connectBtn" class="btn btn-connect" onclick="connectToDevice()">ボタンと接続</button>
 
   <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
@@ -145,8 +149,8 @@
   </div>
 
   <div class="manual-controls">
-    <button id="manualPlayBtn" class="btn btn-manual-play">🔔 鳴らす / 扱う</button>
-    <button id="manualStopBtn" class="btn btn-manual-stop">⏹️ 強制停止</button>
+    <button id="manualPlayBtn" class="btn btn-manual-play" onclick="handleManualPlay()">🔔 鳴らす / 扱う</button>
+    <button id="manualStopBtn" class="btn btn-manual-stop" onclick="forceStopAll()">⏹️ 強制停止</button>
   </div>
 
   <h3 style="font-size: 0.9rem; margin-top: 20px;">受信ログ (実機データの確認用):</h3>
@@ -154,9 +158,7 @@
 </div>
 
 <script>
-  let usbDevice = null;
-  let endpointIn = null;
-
+  let serial = null;
   const bellAudio = new Audio();
   const announcementAudio = new Audio();
   
@@ -199,7 +201,6 @@
     appendLog('⏹️ 発車ベル完奏終了');
   });
 
-  // 戸閉放送再生
   function playAnnouncement() {
     if (announcementAudio.src) {
       announcementAudio.pause();
@@ -212,7 +213,6 @@
     }
   }
 
-  // ベル再生開始
   function startBell() {
     if (!bellAudio.src) {
       appendLog('⚠️ 警告: 発車ベルの音声ファイルが選択されていません。');
@@ -234,7 +234,6 @@
     });
   }
 
-  // 停止・戸閉処理
   function stopBellAndPlayAnnouncement() {
     const mode = document.getElementById('playMode').value;
 
@@ -257,7 +256,6 @@
     }
   }
 
-  // 全音声強制停止
   function forceStopAll() {
     bellAudio.pause();
     bellAudio.currentTime = 0;
@@ -268,7 +266,6 @@
     appendLog('⏹️ すべての音声を強制停止しました');
   }
 
-  // スイッチ信号制御
   function handleSwitchSignal(isON) {
     const mode = document.getElementById('playMode').value;
 
@@ -291,124 +288,39 @@
     lastSwitchState = isON;
   }
 
-  // WebUSB 接続・初期化処理
-  document.getElementById('connectBtn').addEventListener('click', async () => {
-    if (!('usb' in navigator)) {
-      alert('お使いのブラウザはWebUSBに対応していません。Android Chromeを使用してください。');
-      return;
-    }
-
+  // 元サイトと同じTibboWebSerialを使用した接続処理
+  async function connectToDevice() {
     try {
-      usbDevice = await navigator.usb.requestDevice({ filters: [] });
-      await usbDevice.open();
-
-      if (usbDevice.configuration === null) {
-        await usbDevice.selectConfiguration(1);
+      if (typeof TibboWebSerial === 'undefined') {
+        appendLog('❌ エラー: 通信ライブラリがロードされていません。インターネット接続を確認してください。');
+        return;
       }
 
-      // インターフェースのクレームとエンドポイント特定
-      let claimedIface = null;
-      for (const iface of usbDevice.configuration.interfaces) {
-        try {
-          await usbDevice.claimInterface(iface.interfaceNumber);
-          claimedIface = iface;
-          
-          const alt = iface.alternates[0];
-          const epIn = alt.endpoints.find(e => e.direction === 'in');
-          if (epIn) {
-            endpointIn = epIn.endpointNumber;
-            break;
-          }
-        } catch (e) {
-          // イグノア
+      serial = new TibboWebSerial();
+      await serial.init();
+      
+      const statusElem = document.getElementById('connectStatus');
+      statusElem.innerText = '接続済み';
+      statusElem.className = 'status-badge status-connected';
+      appendLog('🟢 デバイス接続に成功しました！');
+
+      // 受信イベントの設定
+      serial.onData = (data) => {
+        appendLog(`📡 受信データ: ${data}`);
+        // スイッチデータの判定
+        if (data.includes('ON') || data.includes('1') || data.length > 0) {
+          handleSwitchSignal(true);
+        } else if (data.includes('OFF') || data.includes('0')) {
+          handleSwitchSignal(false);
         }
-      }
+      };
 
-      // シリアル変換チップ (CH340 / CP2102 / FTDI / CDC-ACM) の初期化コマンド送信
-      try {
-        // Line Coding 設定 (9600bps, 8bit, 1stop)
-        const baudRate = 9600;
-        const lineCoding = new Uint8Array([
-          baudRate & 0xff,
-          (baudRate >> 8) & 0xff,
-          (baudRate >> 16) & 0xff,
-          (baudRate >> 24) & 0xff,
-          0x00, // 1 stop bit
-          0x00, // parity none
-          0x08  // 8 data bits
-        ]);
-
-        // CDC ACM 設定試行
-        await usbDevice.controlTransferOut({
-          requestType: 'class',
-          recipient: 'interface',
-          request: 0x20, // SET_LINE_CODING
-          value: 0,
-          index: claimedIface ? claimedIface.interfaceNumber : 0
-        }, lineCoding);
-
-        // DTR/RTS 有効化
-        await usbDevice.controlTransferOut({
-          requestType: 'class',
-          recipient: 'interface',
-          request: 0x22, // SET_CONTROL_LINE_STATE
-          value: 0x03,   // DTR + RTS
-          index: claimedIface ? claimedIface.interfaceNumber : 0
-        });
-      } catch (cmdErr) {
-        // CH340等固有コマンド試行
-        try {
-          await usbDevice.controlTransferOut({
-            requestType: 'vendor',
-            recipient: 'device',
-            request: 0xA1,
-            value: 0,
-            index: 0
-          });
-        } catch(e){}
-      }
-
-      const statusBadge = document.getElementById('connectionStatus');
-      statusBadge.innerText = '🟢 スイッチ：接続完了';
-      statusBadge.className = 'status-badge status-connected';
-      appendLog(`WebUSB初期化成功: ${usbDevice.productName || 'USB Device'}`);
-
-      listenUsbLoop();
     } catch (err) {
-      appendLog(`接続エラー: ${err.message}`);
-    }
-  });
-
-  // USBデータ受信ループ
-  async function listenUsbLoop() {
-    if (!usbDevice || endpointIn === null) {
-      appendLog('⚠️ 読み取り可能なエンドポイントが見つかりませんでした。');
-      return;
-    }
-
-    appendLog('📡 スイッチの信号待機中...');
-
-    while (usbDevice && usbDevice.opened) {
-      try {
-        const result = await usbDevice.transferIn(endpointIn, 64);
-        if (result && result.data && result.data.byteLength > 0) {
-          const dataArray = new Uint8Array(result.data.buffer);
-          appendLog(`📡 データ受信: [${Array.from(dataArray).join(', ')}]`);
-          
-          const hasData = dataArray.some(b => b > 0);
-          if (hasData) {
-            handleSwitchSignal(true);
-          }
-        }
-      } catch (err) {
-        // タイムアウト等のエラーはリトライ
-        await new Promise(r => setTimeout(r, 100));
-      }
+      appendLog(`❌ 接続失敗: ${err.message || err}`);
     }
   }
 
-  // 手動操作ボタン
-  document.getElementById('manualPlayBtn').addEventListener('click', () => {
+  function handleManualPlay() {
     const mode = document.getElementById('playMode').value;
     if (mode === 'standard') {
       if (!isBellPlaying) {
@@ -420,11 +332,7 @@
       handleSwitchSignal(true);
       setTimeout(() => handleSwitchSignal(false), 100);
     }
-  });
-
-  document.getElementById('manualStopBtn').addEventListener('click', () => {
-    forceStopAll();
-  });
+  }
 </script>
 
 </body>
