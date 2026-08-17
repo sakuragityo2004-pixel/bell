@@ -126,8 +126,8 @@
   <div class="form-group">
     <label for="baudRate">通信速度:</label>
     <select id="baudRate">
-      <option value="9600">9600 (標準)</option>
-      <option value="115200" selected>115200</option>
+      <option value="9600" selected>9600 (標準)</option>
+      <option value="115200">115200</option>
     </select>
   </div>
 
@@ -171,8 +171,6 @@
   let isBellPlaying = false;
   let isWaitingForEnd = false;
   let lastSwitchState = false;
-  let lastStateChangeTime = 0;
-  const DEBOUNCE_DELAY = 100;
 
   function appendLog(msg) {
     const logElem = document.getElementById('log');
@@ -277,14 +275,11 @@
   }
 
   function handleSwitchSignal(isON) {
-    const now = Date.now();
-    if (now - lastStateChangeTime < DEBOUNCE_DELAY) return;
-    lastStateChangeTime = now;
-
     const mode = document.getElementById('playMode').value;
 
     if (mode === 'tachikawa' || mode === 'nishiogikubo') {
-      if (isON) {
+      // 押された瞬間(isON=true)のみトリガー処理
+      if (isON && !lastSwitchState) {
         if (!isBellPlaying) {
           startBell();
         } else {
@@ -292,6 +287,7 @@
         }
       }
     } else {
+      // 標準モード
       if (isON && !lastSwitchState) {
         startBell();
       } else if (!isON && lastSwitchState) {
@@ -301,6 +297,23 @@
 
     lastSwitchState = isON;
   }
+
+  // キーボードイベント監視（HIDモード機器のキー入力「1」に対応）
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
+      if (!e.repeat) {
+        appendLog('⌨️ キーボード/スイッチ入力 [ON]');
+        handleSwitchSignal(true);
+      }
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
+      appendLog('⌨️ キーボード/スイッチ入力 [OFF]');
+      handleSwitchSignal(false);
+    }
+  });
 
   document.getElementById('connectBtn').addEventListener('click', async () => {
     if (!('serial' in navigator)) {
@@ -325,7 +338,7 @@
     }
   });
 
-  // 改行を待たずに生の受信データを即座に処理する設定
+  // バイナリ値 (0x01 / 0x00 / 文字列) を解釈するデータリーダー
   async function readSerialData() {
     const reader = port.readable.getReader();
 
@@ -334,12 +347,19 @@
         const { value, done } = await reader.read();
         if (done) break;
 
-        // 届いたバイトデータをそのまま文字列化（制御文字も可視化）
-        const text = new TextDecoder().decode(value);
-        appendLog(`📡 受信データ(生): "${text}"`);
+        for (let i = 0; i < value.length; i++) {
+          const byteVal = value[i];
+          const charVal = String.fromCharCode(byteVal);
 
-        // 何かしらのデータが届いたら「スイッチが作動した」とみなして再生制御を呼び出す
-        handleSwitchSignal(true);
+          // 1, 0x01, '1', 'ON' などの各種信号を検知
+          if (byteVal === 1 || charVal === '1' || charVal === 'O') {
+            appendLog(`📡 スイッチ信号受信: [ON]`);
+            handleSwitchSignal(true);
+          } else if (byteVal === 0 || charVal === '0' || charVal === 'F') {
+            appendLog(`📡 スイッチ信号受信: [OFF]`);
+            handleSwitchSignal(false);
+          }
+        }
       }
     } catch (err) {
       appendLog(`通信エラー: ${err.message}`);
@@ -363,6 +383,7 @@
       }
     } else {
       handleSwitchSignal(true);
+      setTimeout(() => handleSwitchSignal(false), 100);
     }
   });
 
