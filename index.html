@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>発車ベル制御システム</title>
+  <style>
+    :root {
+      --primary-color: #2e7d32;
+      --bg-color: #f4f6f8;
+      --card-bg: #ffffff;
+      --text-color: #333333;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      margin: 0;
+      padding: 16px;
+      display: flex;
+      justify-content: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 600px;
+      background-color: var(--card-bg);
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      padding: 24px;
+      box-sizing: border-box;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      text-align: center;
+      margin-top: 0;
+      color: var(--primary-color);
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: bold;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+
+    .status-disconnected { background-color: #ffebee; color: #c62828; }
+    .status-connected { background-color: #e8f5e9; color: #2e7d32; }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      margin-bottom: 16px;
+    }
+
+    .btn:active { opacity: 0.8; }
+    .btn-connect { background-color: #f57c00; color: white; }
+    .btn-manual-play { background-color: #0288d1; color: white; margin-bottom: 8px; }
+    .btn-manual-stop { background-color: #d32f2f; color: white; }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 6px;
+      font-size: 0.9rem;
+    }
+
+    input[type="file"], select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-sizing: border-box;
+      background-color: #fafafa;
+    }
+
+    .log-box {
+      background-color: #1e1e1e;
+      color: #00ff66;
+      font-family: monospace;
+      padding: 12px;
+      border-radius: 6px;
+      height: 160px;
+      overflow-y: auto;
+      font-size: 0.8rem;
+      white-space: pre-wrap;
+    }
+
+    .manual-controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .manual-controls .btn {
+      margin-bottom: 0;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>発車ベル制御システム</h1>
+
+  <div style="text-align: center;">
+    <span id="connectionStatus" class="status-badge status-disconnected">🔴 スイッチ：未接続</span>
+  </div>
+
+  <button id="connectBtn" class="btn btn-connect">🔌 スイッチ(USB)を接続する</button>
+
+  <div class="form-group">
+    <label for="baudRate">通信速度:</label>
+    <select id="baudRate">
+      <option value="9600" selected>9600 (標準)</option>
+      <option value="115200">115200</option>
+    </select>
+  </div>
+
+  <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+
+  <div class="form-group">
+    <label for="bellAudioFile">🎵 1. 発車ベル (メロディ):</label>
+    <input type="file" id="bellAudioFile" accept="audio/*">
+  </div>
+
+  <div class="form-group">
+    <label for="announcementAudioFile">🗣️ 2. 戸閉放送 (ドア閉まります):</label>
+    <input type="file" id="announcementAudioFile" accept="audio/*">
+  </div>
+
+  <div class="form-group">
+    <label for="playMode">⚙️ 再生モード (扱い方):</label>
+    <select id="playMode">
+      <option value="tachikawa" selected>立川方式 (1回押しで開始、もう1回で即停止＋戸閉)</option>
+      <option value="nishiogikubo">西荻窪式 (停止操作後、最後まで鳴り切ってから戸閉)</option>
+      <option value="standard">標準モード (押している間ベル＋離すと即戸閉)</option>
+    </select>
+  </div>
+
+  <div class="manual-controls">
+    <button id="manualPlayBtn" class="btn btn-manual-play">🔔 鳴らす (手動)</button>
+    <button id="manualStopBtn" class="btn btn-manual-stop">⏹️ 止める (手動)</button>
+  </div>
+
+  <h3 style="font-size: 0.9rem; margin-top: 20px;">受信ログ (実機データの確認用):</h3>
+  <div id="log" class="log-box">システム待機中...</div>
+</div>
+
+<script>
+  let port = null;
+  let reader = null;
+  let isConnected = false;
+
+  const bellAudio = new Audio();
+  const announcementAudio = new Audio();
+  
+  let isBellPlaying = false;
+  let isWaitingForEnd = false;
+  let lastSwitchState = null;
+  let lastStateChangeTime = 0;
+  const DEBOUNCE_DELAY = 50;
+
+  function appendLog(msg) {
+    const logElem = document.getElementById('log');
+    const now = new Date().toLocaleTimeString();
+    logElem.innerText += `\n[${now}] ${msg}`;
+    logElem.scrollTop = logElem.scrollHeight;
+  }
+
+  // ファイル再選択時のメモリ解放対策
+  let currentBellUrl = null;
+  document.getElementById('bellAudioFile').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (currentBellUrl) URL.revokeObjectURL(currentBellUrl);
+      currentBellUrl = URL.createObjectURL(file);
+      bellAudio.src = currentBellUrl;
+      appendLog(`発車ベル読み込み完了: ${file.name}`);
+    }
+  });
+
+  let currentAnnounceUrl = null;
+  document.getElementById('announcementAudioFile').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (currentAnnounceUrl) URL.revokeObjectURL(currentAnnounceUrl);
+      currentAnnounceUrl = URL.createObjectURL(file);
+      announcementAudio.src = currentAnnounceUrl;
+      appendLog(`戸閉放送読み込み完了: ${file.name}`);
+    }
+  });
+
+  // 西荻窪式：最後まで鳴り終わった時の処理
+  bellAudio.addEventListener('ended', () => {
+    isBellPlaying = false;
+    if (isWaitingForEnd) {
+      isWaitingForEnd = false;
+      appendLog('⏹️ 発車ベル再生終了');
+      playAnnouncement();
+    }
+  });
+
+  function playAnnouncement() {
+    if (announcementAudio.src) {
+      announcementAudio.play().then(() => {
+        appendLog('▶️ 戸閉放送再生中...');
+      }).catch(err => {
+        appendLog(`❌ 放送エラー: ${err.message}`);
+      });
+    }
+  }
+
+  function startBell() {
+    if (!bellAudio.src) {
+      appendLog('⚠️ 警告: 発車ベルの音声ファイルが選択されていません。');
+      return;
+    }
+    announcementAudio.pause();
+    announcementAudio.currentTime = 0;
+
+    bellAudio.loop = true;
+    isWaitingForEnd = false;
+    
+    bellAudio.play().then(() => {
+      isBellPlaying = true;
+      appendLog('▶️ 発車ベル再生中...');
+    }).catch(err => {
+      appendLog(`❌ 再生エラー: ${err.message}`);
+    });
+  }
+
+  function stopBellAndPlayAnnouncement() {
+    const mode = document.getElementById('playMode').value;
+
+    if (!isBellPlaying) return;
+
+    if (mode === 'nishiogikubo') {
+      bellAudio.loop = false;
+      isWaitingForEnd = true;
+      appendLog('⏳ 発車ベル停止要求（曲終わりまで再生後に戸閉）');
+    } else {
+      bellAudio.pause();
+      bellAudio.currentTime = 0;
+      isBellPlaying = false;
+      appendLog('⏹️ 発車ベル停止');
+      playAnnouncement();
+    }
+  }
+
+  function forceStopAll() {
+    bellAudio.pause();
+    bellAudio.currentTime = 0;
+    announcementAudio.pause();
+    announcementAudio.currentTime = 0;
+    isBellPlaying = false;
+    isWaitingForEnd = false;
+    appendLog('⏹️ すべての音声を強制停止しました');
+  }
+
+  // スイッチ状態判定（デバウンス処理付き）
+  function handleSwitchSignal(isON) {
+    const now = Date.now();
+    if (now - lastStateChangeTime < DEBOUNCE_DELAY) return;
+    lastStateChangeTime = now;
+
+    const mode = document.getElementById('playMode').value;
+
+    if (mode === 'tachikawa' || mode === 'nishiogikubo') {
+      if (isON && !lastSwitchState) {
+        if (!isBellPlaying) {
+          startBell();
+        } else {
+          stopBellAndPlayAnnouncement();
+        }
+      }
+    } else {
+      if (isON && !lastSwitchState) {
+        startBell();
+      } else if (!isON && lastSwitchState) {
+        stopBellAndPlayAnnouncement();
+      }
+    }
+
+    lastSwitchState = isON;
+  }
+
+  // Web Serial API (接続処理＆行区切りストリーム対応)
+  document.getElementById('connectBtn').addEventListener('click', async () => {
+    if (!('serial' in navigator)) {
+      alert('お使いのブラウザはWeb Serial APIに対応していません。Chromeを使用してください。');
+      return;
+    }
+
+    const baudRate = parseInt(document.getElementById('baudRate').value, 10);
+
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate });
+
+      isConnected = true;
+      const statusBadge = document.getElementById('connectionStatus');
+      statusBadge.innerText = '🟢 スイッチ：接続完了';
+      statusBadge.className = 'status-badge status-connected';
+      appendLog(`USB接続完了 (ボーレート: ${baudRate})`);
+
+      readSerialData();
+    } catch (err) {
+      appendLog(`接続エラー: ${err.message}`);
+    }
+  });
+
+  // シリアル通信データの読み込み（分割対策：TextDecoderStreamを利用）
+  async function readSerialData() {
+    const textDecoder = new TextDecoderStream();
+    const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+    reader = textDecoder.readable.getReader();
+
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += value;
+        const lines = buffer.split(/[\r\n]+/);
+        buffer = lines.pop(); // 未完成の行はバッファに残す
+
+        for (const line of lines) {
+          const trimmed = line.trim().toUpperCase();
+          if (trimmed.length > 0) {
+            appendLog(`📡 受信データ: "${trimmed}"`); // 実際のデータ確認用ログ
+
+            // より安全な判定ルール
+            if (trimmed === '1' || trimmed === 'ON' || trimmed === 'HIGH') {
+              handleSwitchSignal(true);
+            } else if (trimmed === '0' || trimmed === 'OFF' || trimmed === 'LOW') {
+              handleSwitchSignal(false);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      appendLog(`通信エラー: ${err.message}`);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  // ページ終了・切断時のクローズ処理（ポートロック防止）
+  window.addEventListener('beforeunload', async () => {
+    if (reader) await reader.cancel();
+    if (port) await port.close();
+  });
+
+  // 手動操作ボタン
+  document.getElementById('manualPlayBtn').addEventListener('click', () => {
+    handleSwitchSignal(true);
+  });
+
+  document.getElementById('manualStopBtn').addEventListener('click', () => {
+    stopBellAndPlayAnnouncement();
+  });
+</script>
+
+</body>
+</html>
