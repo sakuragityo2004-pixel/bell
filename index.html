@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>発車ベル制御システム</title>
+  <script type="text/javascript" src="https://mipsparc.github.io/webbuzzer/TibboWebSerial.js"></script>
   <style>
     :root {
       --primary-color: #2e7d32;
@@ -154,14 +155,16 @@
 </div>
 
 <script>
-  let usbDevice = null;
-  let endpointIn = null;
+  let serial;
+  let mainIntervalID, readIntervalID;
+  let lastPressed = 0;
 
   const bellAudio = new Audio();
   const announcementAudio = new Audio();
-  
+
   let isBellPlaying = false;
-  let lastSwitchState = false;
+  let isHardwarePressed = false;
+  let lastHardwarePressed = false;
 
   function appendLog(msg) {
     const logElem = document.getElementById('log');
@@ -170,33 +173,43 @@
     logElem.scrollTop = logElem.scrollHeight;
   }
 
-  // 音声ファイル読み込み
-  let currentBellUrl = null;
+  // --- 音声ファイル選択ハンドラ ---
   document.getElementById('bellAudioFile').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
-      if (currentBellUrl) URL.revokeObjectURL(currentBellUrl);
-      currentBellUrl = URL.createObjectURL(file);
-      bellAudio.src = currentBellUrl;
-      appendLog(`発車ベル読み込み完了: ${file.name}`);
+      const reader = new FileReader();
+      reader.onload = () => {
+        bellAudio.pause();
+        bellAudio.src = reader.result;
+        appendLog(`発車ベル読み込み完了: ${file.name}`);
+      };
+      reader.readAsDataURL(file);
     }
   });
 
-  let currentAnnounceUrl = null;
   document.getElementById('announcementAudioFile').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
-      if (currentAnnounceUrl) URL.revokeObjectURL(currentAnnounceUrl);
-      currentAnnounceUrl = URL.createObjectURL(file);
-      announcementAudio.src = currentAnnounceUrl;
-      appendLog(`戸閉放送読み込み完了: ${file.name}`);
+      const reader = new FileReader();
+      reader.onload = () => {
+        announcementAudio.pause();
+        announcementAudio.src = reader.result;
+        appendLog(`戸閉放送読み込み完了: ${file.name}`);
+      };
+      reader.readAsDataURL(file);
     }
   });
 
+  // 音声終了の管理（立川式で終了後、再スタート可能にする処理）
   bellAudio.addEventListener('ended', () => {
     isBellPlaying = false;
     bellAudio.currentTime = 0;
     appendLog('⏹️ 発車ベル完奏終了');
+  });
+
+  announcementAudio.addEventListener('ended', () => {
+    announcementAudio.currentTime = 0;
+    appendLog('⏹️ 戸閉放送再生完了（待機状態へ復帰）');
   });
 
   function playAnnouncement() {
@@ -205,36 +218,30 @@
       announcementAudio.currentTime = 0;
       announcementAudio.play().then(() => {
         appendLog('▶️ 戸閉放送再生開始');
-      }).catch(err => {
-        appendLog(`❌ 放送再生エラー: ${err.message}`);
-      });
+      }).catch(err => appendLog(`❌ 放送エラー: ${err.message}`));
     }
   }
 
   function startBell() {
     if (!bellAudio.src) {
-      appendLog('⚠️ 警告: 発車ベルの音声ファイルが選択されていません。');
+      appendLog('⚠️ 警告: 発車ベルの音声ファイルが未選択です');
       return;
     }
-    
     announcementAudio.pause();
     announcementAudio.currentTime = 0;
 
     bellAudio.pause();
     bellAudio.currentTime = 0;
     bellAudio.loop = true;
-    
+
     bellAudio.play().then(() => {
       isBellPlaying = true;
       appendLog('▶️ 発車ベル再生開始');
-    }).catch(err => {
-      appendLog(`❌ ベル再生エラー: ${err.message}`);
-    });
+    }).catch(err => appendLog(`❌ ベルエラー: ${err.message}`));
   }
 
   function stopBellAndPlayAnnouncement() {
     const mode = document.getElementById('playMode').value;
-
     if (!isBellPlaying) return;
 
     if (mode === 'tachikawa') {
@@ -260,15 +267,16 @@
     announcementAudio.pause();
     announcementAudio.currentTime = 0;
     isBellPlaying = false;
-    lastSwitchState = false;
-    appendLog('⏹️ すべての音声を強制停止しました');
+    lastHardwarePressed = false;
+    appendLog('⏹️ 強制停止しました');
   }
 
   function handleSwitchSignal(isON) {
     const mode = document.getElementById('playMode').value;
 
     if (mode === 'tachikawa' || mode === 'nishiogikubo') {
-      if (isON && !lastSwitchState) {
+      // 押された瞬間（OFF -> ON）
+      if (isON && !lastHardwarePressed) {
         if (!isBellPlaying) {
           startBell();
         } else {
@@ -276,114 +284,72 @@
         }
       }
     } else {
-      if (isON && !lastSwitchState) {
+      // 標準モード
+      if (isON && !lastHardwarePressed) {
         startBell();
-      } else if (!isON && lastSwitchState) {
+      } else if (!isON && lastHardwarePressed) {
         stopBellAndPlayAnnouncement();
       }
     }
-
-    lastSwitchState = isON;
+    lastHardwarePressed = isON;
   }
 
-  // 元サイト準拠のWebUSB接続ロジック（一般的なシリアル変換ICのVIDを網羅）
-  async function connectToDevice() {
-    if (!('usb' in navigator)) {
-      alert('WebUSBに対応していません。Android Chromeを使用してください。');
-      return;
-    }
-
-    try {
-      // 主要なUSB-シリアル変換チップ(CH340, FTDI, CP210x, PL2303, Arduino等)のフィルタ
-      const filters = [
-        { vendorId: 0x1a86 }, // CH340 (元サイト互換)
-        { vendorId: 0x0403 }, // FTDI
-        { vendorId: 0x10c4 }, // CP210x
-        { vendorId: 0x067b }, // PL2303
-        { vendorId: 0x2341 }  // Arduino
-      ];
-
-      try {
-        usbDevice = await navigator.usb.requestDevice({ filters: filters });
-      } catch (e) {
-        // フィルタで出ない場合は全検索フォールバック
-        usbDevice = await navigator.usb.requestDevice({ filters: [] });
-      }
-
-      await usbDevice.open();
-
-      if (usbDevice.configuration === null) {
-        await usbDevice.selectConfiguration(1);
-      }
-
-      // インターフェースのクレーム
-      let interfaceNumber = 0;
-      for (const iface of usbDevice.configuration.interfaces) {
-        try {
-          await usbDevice.claimInterface(iface.interfaceNumber);
-          interfaceNumber = iface.interfaceNumber;
-          const alt = iface.alternates[0];
-          const ep = alt.endpoints.find(e => e.direction === 'in');
-          if (ep) {
-            endpointIn = ep.endpointNumber;
-            break;
-          }
-        } catch (err) {}
-      }
-
-      const statusElem = document.getElementById('connectStatus');
-      statusElem.innerText = '接続済み';
-      statusElem.className = 'status-badge status-connected';
-      appendLog(`🟢 接続成功: ${usbDevice.productName || 'USB Switch'}`);
-
-      startUsbReadLoop();
-
-    } catch (err) {
-      appendLog(`❌ 接続失敗: ${err.message || err}`);
-    }
+  // --- 元サイト（buzzer.js）そのままの通信ロジック ---
+  function connectToDevice() {
+    const filters = [{ 'vendorId': 0x1a86 }];
+    navigator.usb.requestDevice({ 'filters': filters }).then(device => {
+      serial = new TibboWebSerial.Serial(device, { 'encoding': 'UTF8', 'autoReadData': false });
+      serial.connectOK = onConnectOK;
+      serial.disconnectOK = onDisconnectOK;
+      serial.connect();
+    }).catch(err => {
+      appendLog(`❌ 接続失敗: ${err}`);
+      alert('ボタンとの接続に失敗しました');
+    });
   }
 
-  // 受信ループ処理
-  async function startUsbReadLoop() {
-    appendLog('📡 スイッチ信号監視中...');
-    
-    // シリアル初期化制御信号を送る（CH340等で必要な処理）
-    try {
-      await usbDevice.controlTransferOut({
-        requestType: 'vendor',
-        recipient: 'device',
-        request: 0xA1,
-        value: 0,
-        index: 0
-      });
-    } catch (e) {}
+  function onConnectOK() {
+    mainIntervalID = setInterval(mainLoop, 50);
+    readIntervalID = setInterval(readDataLoop, 20);
+    const statusElem = document.getElementById('connectStatus');
+    statusElem.innerText = '接続済み';
+    statusElem.className = 'status-badge status-connected';
+    appendLog('🟢 ボタンと接続完了！');
+  }
 
-    while (usbDevice && usbDevice.opened) {
-      try {
-        const ep = endpointIn || 1;
-        const result = await usbDevice.transferIn(ep, 64);
-        if (result && result.data && result.data.byteLength > 0) {
-          const arr = new Uint8Array(result.data.buffer);
-          appendLog(`📡 データ受信: [${Array.from(arr).join(', ')}]`);
-          
-          // データが0以外であればスイッチ入力と判定
-          const isPressed = arr.some(v => v > 0);
-          handleSwitchSignal(isPressed);
-        }
-      } catch (err) {
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
-    }
+  function onDisconnectOK() {
+    clearInterval(mainIntervalID);
+    clearInterval(readIntervalID);
+    const statusElem = document.getElementById('connectStatus');
+    statusElem.innerText = '未接続';
+    statusElem.className = 'status-badge status-disconnected';
+    appendLog('🔴 切断されました');
+  }
+
+  function readDataLoop() {
+    if (!serial) return;
+    serial.readAsync().then(res => {
+      lastPressed = Date.now();
+    }).catch(err => {
+      onDisconnectOK();
+    });
+  }
+
+  function mainLoop() {
+    if (!serial) return;
+    const checkSignal = new Uint8Array([0x56, 0x56, 0x56]);
+    serial.write(checkSignal);
+
+    // 150ms以内にレスポンスがあればスイッチが押されていると判定
+    isHardwarePressed = (Date.now() - lastPressed < 150);
+    handleSwitchSignal(isHardwarePressed);
   }
 
   function handleManualPlay() {
     const mode = document.getElementById('playMode').value;
     if (mode === 'standard') {
-      if (!isBellPlaying) {
-        startBell();
-      } else {
-        stopBellAndPlayAnnouncement();
-      }
+      if (!isBellPlaying) startBell();
+      else stopBellAndPlayAnnouncement();
     } else {
       handleSwitchSignal(true);
       setTimeout(() => handleSwitchSignal(false), 100);
