@@ -13,7 +13,7 @@
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background-color: var(--bg-color);
       color: var(--text-color);
       margin: 0;
@@ -126,8 +126,8 @@
   <div class="form-group">
     <label for="baudRate">通信速度:</label>
     <select id="baudRate">
-      <option value="9600" selected>9600 (標準)</option>
-      <option value="115200">115200</option>
+      <option value="9600">9600 (標準)</option>
+      <option value="115200" selected>115200</option>
     </select>
   </div>
 
@@ -170,9 +170,9 @@
   
   let isBellPlaying = false;
   let isWaitingForEnd = false;
-  let lastSwitchState = null;
+  let lastSwitchState = false;
   let lastStateChangeTime = 0;
-  const DEBOUNCE_DELAY = 50;
+  const DEBOUNCE_DELAY = 100;
 
   function appendLog(msg) {
     const logElem = document.getElementById('log');
@@ -181,7 +181,6 @@
     logElem.scrollTop = logElem.scrollHeight;
   }
 
-  // 音声ファイルの読み込み
   let currentBellUrl = null;
   document.getElementById('bellAudioFile').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -204,7 +203,6 @@
     }
   });
 
-  // 西荻窪式：曲が最後まで鳴り終わった時の処理
   bellAudio.addEventListener('ended', () => {
     isBellPlaying = false;
     bellAudio.currentTime = 0;
@@ -215,14 +213,9 @@
     }
   });
 
-  // 戸閉放送が終了した時の処理
-  announcementAudio.addEventListener('ended', () => {
-    announcementAudio.currentTime = 0;
-    appendLog('⏹️ 戸閉放送終了');
-  });
-
   function playAnnouncement() {
     if (announcementAudio.src) {
+      announcementAudio.pause();
       announcementAudio.currentTime = 0;
       announcementAudio.play().then(() => {
         appendLog('▶️ 戸閉放送再生中...');
@@ -238,10 +231,10 @@
       return;
     }
     
-    // 放送を止めて頭出し
     announcementAudio.pause();
     announcementAudio.currentTime = 0;
 
+    bellAudio.pause();
     bellAudio.currentTime = 0;
     bellAudio.loop = true;
     isWaitingForEnd = false;
@@ -267,7 +260,7 @@
       bellAudio.pause();
       bellAudio.currentTime = 0;
       isBellPlaying = false;
-      appendLog('⏹️ 発車ベル停止');
+      appendLog('⏹️ 発車ベル即時停止');
       playAnnouncement();
     }
   }
@@ -279,11 +272,10 @@
     announcementAudio.currentTime = 0;
     isBellPlaying = false;
     isWaitingForEnd = false;
-    lastSwitchState = null;
+    lastSwitchState = false;
     appendLog('⏹️ すべての音声を強制停止しました');
   }
 
-  // スイッチ状態判定（立川式 / 西荻窪式 / 標準）
   function handleSwitchSignal(isON) {
     const now = Date.now();
     if (now - lastStateChangeTime < DEBOUNCE_DELAY) return;
@@ -292,7 +284,6 @@
     const mode = document.getElementById('playMode').value;
 
     if (mode === 'tachikawa' || mode === 'nishiogikubo') {
-      // 押すたびにトグル（再生↔停止）
       if (isON) {
         if (!isBellPlaying) {
           startBell();
@@ -301,7 +292,6 @@
         }
       }
     } else {
-      // 標準モード：ONで再生、OFFで停止
       if (isON && !lastSwitchState) {
         startBell();
       } else if (!isON && lastSwitchState) {
@@ -312,10 +302,9 @@
     lastSwitchState = isON;
   }
 
-  // Web Serial API (接続処理)
   document.getElementById('connectBtn').addEventListener('click', async () => {
     if (!('serial' in navigator)) {
-      alert('お使いのブラウザはWeb Serial APIに対応していません。Chromeを使用してください。');
+      alert('お使いのブラウザはWeb Serial APIに対応していません。');
       return;
     }
 
@@ -336,35 +325,21 @@
     }
   });
 
-  // シリアル通信データの読み込み
+  // 改行を待たずに生の受信データを即座に処理する設定
   async function readSerialData() {
-    const textDecoder = new TextDecoderStream();
-    const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
-    reader = textDecoder.readable.getReader();
-
-    let buffer = '';
+    const reader = port.readable.getReader();
 
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
-        buffer += value;
-        const lines = buffer.split(/[\r\n]+/);
-        buffer = lines.pop();
+        // 届いたバイトデータをそのまま文字列化（制御文字も可視化）
+        const text = new TextDecoder().decode(value);
+        appendLog(`📡 受信データ(生): "${text}"`);
 
-        for (const line of lines) {
-          const trimmed = line.trim().toUpperCase();
-          if (trimmed.length > 0) {
-            appendLog(`📡 受信データ: "${trimmed}"`);
-
-            if (trimmed === '1' || trimmed === 'ON' || trimmed === 'HIGH') {
-              handleSwitchSignal(true);
-            } else if (trimmed === '0' || trimmed === 'OFF' || trimmed === 'LOW') {
-              handleSwitchSignal(false);
-            }
-          }
-        }
+        // 何かしらのデータが届いたら「スイッチが作動した」とみなして再生制御を呼び出す
+        handleSwitchSignal(true);
       }
     } catch (err) {
       appendLog(`通信エラー: ${err.message}`);
@@ -373,15 +348,22 @@
     }
   }
 
-  // クローズ処理
   window.addEventListener('beforeunload', async () => {
     if (reader) await reader.cancel();
     if (port) await port.close();
   });
 
-  // 手動操作ボタン
   document.getElementById('manualPlayBtn').addEventListener('click', () => {
-    handleSwitchSignal(true);
+    const mode = document.getElementById('playMode').value;
+    if (mode === 'standard') {
+      if (!isBellPlaying) {
+        startBell();
+      } else {
+        stopBellAndPlayAnnouncement();
+      }
+    } else {
+      handleSwitchSignal(true);
+    }
   });
 
   document.getElementById('manualStopBtn').addEventListener('click', () => {
