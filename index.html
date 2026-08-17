@@ -4,9 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>発車ベル制御システム</title>
-  
-  <!-- 元サイトと同じシリアル通信用ライブラリ -->
-  <script src="https://mipsparc.github.io/webbuzzer/TibboWebSerial.js"></script>
 
   <style>
     :root {
@@ -158,7 +155,9 @@
 </div>
 
 <script>
-  let serial = null;
+  let port = null;
+  let reader = null;
+
   const bellAudio = new Audio();
   const announcementAudio = new Audio();
   
@@ -288,35 +287,48 @@
     lastSwitchState = isON;
   }
 
-  // 元サイトと同じTibboWebSerialを使用した接続処理
+  // Web Serial API による接続処理
   async function connectToDevice() {
-    try {
-      if (typeof TibboWebSerial === 'undefined') {
-        appendLog('❌ エラー: 通信ライブラリがロードされていません。インターネット接続を確認してください。');
-        return;
-      }
+    if (!('serial' in navigator)) {
+      alert('お使いのブラウザはWeb Serial APIに対応していません。Android Chromeを使用しているか確認してください。');
+      return;
+    }
 
-      serial = new TibboWebSerial();
-      await serial.init();
-      
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 9600 }); // 標準通信速度
+
       const statusElem = document.getElementById('connectStatus');
       statusElem.innerText = '接続済み';
       statusElem.className = 'status-badge status-connected';
       appendLog('🟢 デバイス接続に成功しました！');
 
-      // 受信イベントの設定
-      serial.onData = (data) => {
-        appendLog(`📡 受信データ: ${data}`);
-        // スイッチデータの判定
-        if (data.includes('ON') || data.includes('1') || data.length > 0) {
-          handleSwitchSignal(true);
-        } else if (data.includes('OFF') || data.includes('0')) {
-          handleSwitchSignal(false);
-        }
-      };
-
+      readSerialLoop();
     } catch (err) {
       appendLog(`❌ 接続失敗: ${err.message || err}`);
+    }
+  }
+
+  // シリアルデータ連続読み込みルーチン
+  async function readSerialLoop() {
+    const textDecoder = new TextDecoderStream();
+    const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+    reader = textDecoder.readable.getReader();
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          reader.releaseLock();
+          break;
+        }
+        if (value) {
+          appendLog(`📡 受信データ: ${value.trim()}`);
+          handleSwitchSignal(true);
+        }
+      }
+    } catch (err) {
+      appendLog(`通信エラー: ${err.message}`);
     }
   }
 
