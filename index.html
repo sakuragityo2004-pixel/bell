@@ -291,7 +291,7 @@
     lastSwitchState = isON;
   }
 
-  // WebUSB 接続処理
+  // WebUSB 接続・初期化処理
   document.getElementById('connectBtn').addEventListener('click', async () => {
     if (!('usb' in navigator)) {
       alert('お使いのブラウザはWebUSBに対応していません。Android Chromeを使用してください。');
@@ -306,14 +306,13 @@
         await usbDevice.selectConfiguration(1);
       }
 
-      // 使えるインターフェースを探してクレーム
-      let interfaceNumber = 0;
+      // インターフェースのクレームとエンドポイント特定
+      let claimedIface = null;
       for (const iface of usbDevice.configuration.interfaces) {
         try {
           await usbDevice.claimInterface(iface.interfaceNumber);
-          interfaceNumber = iface.interfaceNumber;
+          claimedIface = iface;
           
-          // INエンドポイントを探す
           const alt = iface.alternates[0];
           const epIn = alt.endpoints.find(e => e.direction === 'in');
           if (epIn) {
@@ -321,14 +320,58 @@
             break;
           }
         } catch (e) {
-          // クレーム失敗した場合は次を試す
+          // イグノア
         }
+      }
+
+      // シリアル変換チップ (CH340 / CP2102 / FTDI / CDC-ACM) の初期化コマンド送信
+      try {
+        // Line Coding 設定 (9600bps, 8bit, 1stop)
+        const baudRate = 9600;
+        const lineCoding = new Uint8Array([
+          baudRate & 0xff,
+          (baudRate >> 8) & 0xff,
+          (baudRate >> 16) & 0xff,
+          (baudRate >> 24) & 0xff,
+          0x00, // 1 stop bit
+          0x00, // parity none
+          0x08  // 8 data bits
+        ]);
+
+        // CDC ACM 設定試行
+        await usbDevice.controlTransferOut({
+          requestType: 'class',
+          recipient: 'interface',
+          request: 0x20, // SET_LINE_CODING
+          value: 0,
+          index: claimedIface ? claimedIface.interfaceNumber : 0
+        }, lineCoding);
+
+        // DTR/RTS 有効化
+        await usbDevice.controlTransferOut({
+          requestType: 'class',
+          recipient: 'interface',
+          request: 0x22, // SET_CONTROL_LINE_STATE
+          value: 0x03,   // DTR + RTS
+          index: claimedIface ? claimedIface.interfaceNumber : 0
+        });
+      } catch (cmdErr) {
+        // CH340等固有コマンド試行
+        try {
+          await usbDevice.controlTransferOut({
+            requestType: 'vendor',
+            recipient: 'device',
+            request: 0xA1,
+            value: 0,
+            index: 0
+          });
+        } catch(e){}
       }
 
       const statusBadge = document.getElementById('connectionStatus');
       statusBadge.innerText = '🟢 スイッチ：接続完了';
       statusBadge.className = 'status-badge status-connected';
-      appendLog(`WebUSB接続成功: ${usbDevice.productName || 'USB Device'}`);
+      appendLog(`WebUSB初期化成功: ${usbDevice.productName || 'USB Device'}`);
 
       listenUsbLoop();
     } catch (err) {
@@ -343,24 +386,23 @@
       return;
     }
 
+    appendLog('📡 スイッチの信号待機中...');
+
     while (usbDevice && usbDevice.opened) {
       try {
         const result = await usbDevice.transferIn(endpointIn, 64);
         if (result && result.data && result.data.byteLength > 0) {
           const dataArray = new Uint8Array(result.data.buffer);
+          appendLog(`📡 データ受信: [${Array.from(dataArray).join(', ')}]`);
           
-          // データに変化があるかチェック（スイッチが押されたか）
           const hasData = dataArray.some(b => b > 0);
           if (hasData) {
-            appendLog(`📡 USBデータ受信: [${Array.from(dataArray.slice(0, 8)).join(', ')}]`);
             handleSwitchSignal(true);
           }
         }
       } catch (err) {
-        // transferIn の一時的なタイムアウト等は無視してループ継続
-        if (err.message.includes('The transfer was cancelled') || err.message.includes('error')) {
-          await new Promise(r => setTimeout(r, 100));
-        }
+        // タイムアウト等のエラーはリトライ
+        await new Promise(r => setTimeout(r, 100));
       }
     }
   }
