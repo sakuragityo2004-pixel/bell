@@ -139,14 +139,14 @@
   <div class="form-group">
     <label for="playMode">⚙️ 再生モード (扱い方):</label>
     <select id="playMode">
-      <option value="tachikawa" selected>立川式 (1回押しで開始、もう1回で完奏＋戸閉)</option>
-      <option value="nishiogikubo">西荻窪式 (1回押しで開始、もう1回で完奏後に戸閉)</option>
-      <option value="standard">標準モード (押している間再生、離して戸閉)</option>
+      <option value="tachikawa" selected>立川式 (ONで開始 → OFFで戻った時に完奏＋戸閉)</option>
+      <option value="nishiogikubo">西荻窪式 (ONで開始 → OFFで戻った時に完奏後に戸閉)</option>
+      <option value="standard">標準モード (ONで開始 → OFFで即時停止＋戸閉)</option>
     </select>
   </div>
 
   <div class="manual-controls">
-    <button id="manualPlayBtn" class="btn btn-manual-play" onclick="handleManualPlay()">🔔 鳴らす / 扱う</button>
+    <button id="manualPlayBtn" class="btn btn-manual-play" onclick="handleManualToggle()">🔔 手動ON / OFF</button>
     <button id="manualStopBtn" class="btn btn-manual-stop" onclick="forceStopAll()">⏹️ 強制停止</button>
   </div>
 
@@ -165,6 +165,7 @@
   let isBellPlaying = false;
   let isHardwarePressed = false;
   let lastHardwarePressed = false;
+  let isManualOn = false;
 
   function appendLog(msg) {
     const logElem = document.getElementById('log');
@@ -200,7 +201,6 @@
     }
   });
 
-  // 音声終了の管理（立川式で終了後、再スタート可能にする処理）
   bellAudio.addEventListener('ended', () => {
     isBellPlaying = false;
     bellAudio.currentTime = 0;
@@ -246,17 +246,17 @@
 
     if (mode === 'tachikawa') {
       bellAudio.loop = false;
-      appendLog('🔔 立川式: メロディ完奏へ切り替え ＋ 戸閉放送を同時に開始');
+      appendLog('🔔 立川式: スイッチOFF検知 → 完奏切り替え ＋ 戸閉放送開始');
       playAnnouncement();
     } else if (mode === 'nishiogikubo') {
       bellAudio.loop = false;
-      appendLog('⏳ 西荻窪式: 完奏後に戸閉放送を開始します');
+      appendLog('⏳ 西荻窪式: スイッチOFF検知 → 完奏後に戸閉放送開始');
       bellAudio.addEventListener('ended', playAnnouncement, { once: true });
     } else {
       bellAudio.pause();
       bellAudio.currentTime = 0;
       isBellPlaying = false;
-      appendLog('⏹️ 発車ベル即時停止');
+      appendLog('⏹️ 標準モード: スイッチOFF検知 → 即時停止 ＋ 戸閉放送開始');
       playAnnouncement();
     }
   }
@@ -268,33 +268,26 @@
     announcementAudio.currentTime = 0;
     isBellPlaying = false;
     lastHardwarePressed = false;
+    isManualOn = false;
     appendLog('⏹️ 強制停止しました');
   }
 
   function handleSwitchSignal(isON) {
-    const mode = document.getElementById('playMode').value;
-
-    if (mode === 'tachikawa' || mode === 'nishiogikubo') {
-      // 押された瞬間（OFF -> ON）
-      if (isON && !lastHardwarePressed) {
-        if (!isBellPlaying) {
-          startBell();
-        } else {
-          stopBellAndPlayAnnouncement();
-        }
-      }
-    } else {
-      // 標準モード
-      if (isON && !lastHardwarePressed) {
-        startBell();
-      } else if (!isON && lastHardwarePressed) {
-        stopBellAndPlayAnnouncement();
-      }
+    // ON状態になった瞬間 (OFF -> ON)
+    if (isON && !lastHardwarePressed) {
+      appendLog('🔘 スイッチONを検知');
+      startBell();
     }
+    // OFF状態になった瞬間 (ON -> OFF) = ONボタンが戻った時
+    else if (!isON && lastHardwarePressed) {
+      appendLog('🔘 スイッチOFF（ONボタン復帰）を検知');
+      stopBellAndPlayAnnouncement();
+    }
+
     lastHardwarePressed = isON;
   }
 
-  // --- 元サイト（buzzer.js）そのままの通信ロジック ---
+  // --- 通信ロジック ---
   function connectToDevice() {
     const filters = [{ 'vendorId': 0x1a86 }];
     navigator.usb.requestDevice({ 'filters': filters }).then(device => {
@@ -340,20 +333,13 @@
     const checkSignal = new Uint8Array([0x56, 0x56, 0x56]);
     serial.write(checkSignal);
 
-    // 150ms以内にレスポンスがあればスイッチが押されていると判定
     isHardwarePressed = (Date.now() - lastPressed < 150);
     handleSwitchSignal(isHardwarePressed);
   }
 
-  function handleManualPlay() {
-    const mode = document.getElementById('playMode').value;
-    if (mode === 'standard') {
-      if (!isBellPlaying) startBell();
-      else stopBellAndPlayAnnouncement();
-    } else {
-      handleSwitchSignal(true);
-      setTimeout(() => handleSwitchSignal(false), 100);
-    }
+  function handleManualToggle() {
+    isManualOn = !isManualOn;
+    handleSwitchSignal(isManualOn);
   }
 </script>
 
