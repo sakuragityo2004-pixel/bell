@@ -121,6 +121,7 @@
     <span id="connectionStatus" class="status-badge status-disconnected">🔴 スイッチ：未接続</span>
   </div>
 
+  <!-- シリアル通信専用の接続ボタン -->
   <button id="connectBtn" class="btn btn-connect">🔌 スイッチ(USB2.0-Serial)を接続する</button>
 
   <div class="form-group">
@@ -146,9 +147,9 @@
   <div class="form-group">
     <label for="playMode">⚙️ 再生モード (扱い方):</label>
     <select id="playMode">
-      <option value="tachikawa" selected>立川式 (ONで開始、OFFで曲完奏＋同時に戸閉重畳)</option>
-      <option value="nishiogikubo">西荻窪式 (OFF操作後、曲終わりまで待ってから戸閉)</option>
-      <option value="standard">標準モード (押している間ベル＋離すと即停止・戸閉)</option>
+      <option value="tachikawa" selected>立川式 (OFF操作で曲完奏＋同時に戸閉放送開始)</option>
+      <option value="nishiogikubo">西荻窪式 (OFF操作で曲完奏後に戸閉放送開始)</option>
+      <option value="standard">標準モード (OFF操作で即時停止＋戸閉放送開始)</option>
     </select>
   </div>
 
@@ -177,6 +178,7 @@
     logElem.scrollTop = logElem.scrollHeight;
   }
 
+  // ファイル読み込み処理
   let currentBellUrl = null;
   document.getElementById('bellAudioFile').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -202,9 +204,10 @@
   bellAudio.addEventListener('ended', () => {
     isBellPlaying = false;
     bellAudio.currentTime = 0;
-    appendLog('⏹️ 発車ベル再生終了');
+    appendLog('⏹️ 発車ベル完奏終了');
   });
 
+  // 戸閉放送再生
   function playAnnouncement() {
     if (announcementAudio.src) {
       announcementAudio.pause();
@@ -212,11 +215,12 @@
       announcementAudio.play().then(() => {
         appendLog('▶️ 戸閉放送再生開始');
       }).catch(err => {
-        appendLog(`❌ 放送エラー: ${err.message}`);
+        appendLog(`❌ 放送再生エラー: ${err.message}`);
       });
     }
   }
 
+  // ベル再生開始
   function startBell() {
     if (!bellAudio.src) {
       appendLog('⚠️ 警告: 発車ベルの音声ファイルが選択されていません。');
@@ -234,27 +238,28 @@
       isBellPlaying = true;
       appendLog('▶️ 発車ベル再生開始');
     }).catch(err => {
-      appendLog(`❌ 再生エラー: ${err.message}`);
+      appendLog(`❌ ベル再生エラー: ${err.message}`);
     });
   }
 
+  // 停止・戸閉処理
   function stopBellAndPlayAnnouncement() {
     const mode = document.getElementById('playMode').value;
 
     if (!isBellPlaying) return;
 
     if (mode === 'tachikawa') {
-      // 立川式: ループを解除してメロディは最後まで流しつつ、同時に戸閉放送を開始
+      // 立川式：ループを解除して最後まで流しつつ、同時に戸閉放送を開始
       bellAudio.loop = false;
-      appendLog('🔔 立川式: メロディを最後まで流しつつ、戸閉放送を同時に重ねて開始');
+      appendLog('🔔 立川式: メロディ完奏へ切り替え ＋ 戸閉放送を同時に開始');
       playAnnouncement();
     } else if (mode === 'nishiogikubo') {
-      // 西荻窪式: ループを解除し、曲が終わった後に戸閉放送（endedイベントで処理）
+      // 西荻窪式：ループを解除し、曲が終わった後に戸閉放送
       bellAudio.loop = false;
       appendLog('⏳ 西荻窪式: 完奏後に戸閉放送を開始します');
       bellAudio.addEventListener('ended', playAnnouncement, { once: true });
     } else {
-      // 標準モード: メロディは即時停止し、戸閉放送を開始
+      // 標準モード：即時停止して戸閉放送
       bellAudio.pause();
       bellAudio.currentTime = 0;
       isBellPlaying = false;
@@ -263,6 +268,7 @@
     }
   }
 
+  // 全音声強制停止
   function forceStopAll() {
     bellAudio.pause();
     bellAudio.currentTime = 0;
@@ -273,6 +279,7 @@
     appendLog('⏹️ すべての音声を強制停止しました');
   }
 
+  // スイッチ信号制御
   function handleSwitchSignal(isON) {
     const mode = document.getElementById('playMode').value;
 
@@ -295,6 +302,7 @@
     lastSwitchState = isON;
   }
 
+  // Web Serial API 接続処理
   document.getElementById('connectBtn').addEventListener('click', async () => {
     if (!('serial' in navigator)) {
       alert('お使いのブラウザはWeb Serial APIに対応していません。Android Chromeを利用してください。');
@@ -310,7 +318,7 @@
       const statusBadge = document.getElementById('connectionStatus');
       statusBadge.innerText = '🟢 スイッチ：接続完了';
       statusBadge.className = 'status-badge status-connected';
-      appendLog(`USB接続完了 (ボーレート: ${baudRate})`);
+      appendLog(`USB Serial接続完了 (ボーレート: ${baudRate})`);
 
       readSerialData();
     } catch (err) {
@@ -318,6 +326,7 @@
     }
   });
 
+  // シリアルデータ読み取り
   async function readSerialData() {
     const reader = port.readable.getReader();
 
@@ -326,7 +335,7 @@
         const { value, done } = await reader.read();
         if (done) break;
 
-        appendLog(`📡 シリアルデータ受信: [${Array.from(value).join(', ')}]`);
+        appendLog(`📡 シリアル受信: [${Array.from(value).join(', ')}]`);
 
         const hasSignal = value.some(val => val > 0);
         if (hasSignal) {
@@ -340,6 +349,7 @@
     }
   }
 
+  // 手動操作ボタン
   document.getElementById('manualPlayBtn').addEventListener('click', () => {
     const mode = document.getElementById('playMode').value;
     if (mode === 'standard') {
