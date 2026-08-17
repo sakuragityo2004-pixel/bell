@@ -65,7 +65,7 @@
     }
 
     .btn:active { opacity: 0.8; }
-    .btn-connect { background-color: #f57c00; color: white; }
+    .btn-connect { background-color: #e65100; color: white; }
     .btn-manual-play { background-color: #0288d1; color: white; }
     .btn-manual-stop { background-color: #d32f2f; color: white; }
 
@@ -121,16 +121,7 @@
     <span id="connectionStatus" class="status-badge status-disconnected">🔴 スイッチ：未接続</span>
   </div>
 
-  <!-- シリアル通信専用の接続ボタン -->
-  <button id="connectBtn" class="btn btn-connect">🔌 スイッチ(USB2.0-Serial)を接続する</button>
-
-  <div class="form-group">
-    <label for="baudRate">通信速度:</label>
-    <select id="baudRate">
-      <option value="9600" selected>9600 (標準)</option>
-      <option value="115200">115200</option>
-    </select>
-  </div>
+  <button id="connectBtn" class="btn btn-connect">🔌 USBスイッチを接続する (WebUSB)</button>
 
   <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
@@ -147,9 +138,9 @@
   <div class="form-group">
     <label for="playMode">⚙️ 再生モード (扱い方):</label>
     <select id="playMode">
-      <option value="tachikawa" selected>立川式 (OFF操作で曲完奏＋同時に戸閉放送開始)</option>
-      <option value="nishiogikubo">西荻窪式 (OFF操作で曲完奏後に戸閉放送開始)</option>
-      <option value="standard">標準モード (OFF操作で即時停止＋戸閉放送開始)</option>
+      <option value="tachikawa" selected>立川式 (1回押しで開始、もう1回で完奏＋戸閉)</option>
+      <option value="nishiogikubo">西荻窪式 (1回押しで開始、もう1回で完奏後に戸閉)</option>
+      <option value="standard">標準モード (押している間再生、離して戸閉)</option>
     </select>
   </div>
 
@@ -163,7 +154,8 @@
 </div>
 
 <script>
-  let port = null;
+  let usbDevice = null;
+  let endpointIn = null;
 
   const bellAudio = new Audio();
   const announcementAudio = new Audio();
@@ -178,7 +170,7 @@
     logElem.scrollTop = logElem.scrollHeight;
   }
 
-  // ファイル読み込み処理
+  // 音声ファイル読み込み
   let currentBellUrl = null;
   document.getElementById('bellAudioFile').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -249,17 +241,14 @@
     if (!isBellPlaying) return;
 
     if (mode === 'tachikawa') {
-      // 立川式：ループを解除して最後まで流しつつ、同時に戸閉放送を開始
       bellAudio.loop = false;
       appendLog('🔔 立川式: メロディ完奏へ切り替え ＋ 戸閉放送を同時に開始');
       playAnnouncement();
     } else if (mode === 'nishiogikubo') {
-      // 西荻窪式：ループを解除し、曲が終わった後に戸閉放送
       bellAudio.loop = false;
       appendLog('⏳ 西荻窪式: 完奏後に戸閉放送を開始します');
       bellAudio.addEventListener('ended', playAnnouncement, { once: true });
     } else {
-      // 標準モード：即時停止して戸閉放送
       bellAudio.pause();
       bellAudio.currentTime = 0;
       isBellPlaying = false;
@@ -302,50 +291,77 @@
     lastSwitchState = isON;
   }
 
-  // Web Serial API 接続処理
+  // WebUSB 接続処理
   document.getElementById('connectBtn').addEventListener('click', async () => {
-    if (!('serial' in navigator)) {
-      alert('お使いのブラウザはWeb Serial APIに対応していません。Android Chromeを利用してください。');
+    if (!('usb' in navigator)) {
+      alert('お使いのブラウザはWebUSBに対応していません。Android Chromeを使用してください。');
       return;
     }
 
-    const baudRate = parseInt(document.getElementById('baudRate').value, 10);
-
     try {
-      port = await navigator.serial.requestPort();
-      await port.open({ baudRate });
+      usbDevice = await navigator.usb.requestDevice({ filters: [] });
+      await usbDevice.open();
+
+      if (usbDevice.configuration === null) {
+        await usbDevice.selectConfiguration(1);
+      }
+
+      // 使えるインターフェースを探してクレーム
+      let interfaceNumber = 0;
+      for (const iface of usbDevice.configuration.interfaces) {
+        try {
+          await usbDevice.claimInterface(iface.interfaceNumber);
+          interfaceNumber = iface.interfaceNumber;
+          
+          // INエンドポイントを探す
+          const alt = iface.alternates[0];
+          const epIn = alt.endpoints.find(e => e.direction === 'in');
+          if (epIn) {
+            endpointIn = epIn.endpointNumber;
+            break;
+          }
+        } catch (e) {
+          // クレーム失敗した場合は次を試す
+        }
+      }
 
       const statusBadge = document.getElementById('connectionStatus');
       statusBadge.innerText = '🟢 スイッチ：接続完了';
       statusBadge.className = 'status-badge status-connected';
-      appendLog(`USB Serial接続完了 (ボーレート: ${baudRate})`);
+      appendLog(`WebUSB接続成功: ${usbDevice.productName || 'USB Device'}`);
 
-      readSerialData();
+      listenUsbLoop();
     } catch (err) {
       appendLog(`接続エラー: ${err.message}`);
     }
   });
 
-  // シリアルデータ読み取り
-  async function readSerialData() {
-    const reader = port.readable.getReader();
+  // USBデータ受信ループ
+  async function listenUsbLoop() {
+    if (!usbDevice || endpointIn === null) {
+      appendLog('⚠️ 読み取り可能なエンドポイントが見つかりませんでした。');
+      return;
+    }
 
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        appendLog(`📡 シリアル受信: [${Array.from(value).join(', ')}]`);
-
-        const hasSignal = value.some(val => val > 0);
-        if (hasSignal) {
-          handleSwitchSignal(true);
+    while (usbDevice && usbDevice.opened) {
+      try {
+        const result = await usbDevice.transferIn(endpointIn, 64);
+        if (result && result.data && result.data.byteLength > 0) {
+          const dataArray = new Uint8Array(result.data.buffer);
+          
+          // データに変化があるかチェック（スイッチが押されたか）
+          const hasData = dataArray.some(b => b > 0);
+          if (hasData) {
+            appendLog(`📡 USBデータ受信: [${Array.from(dataArray.slice(0, 8)).join(', ')}]`);
+            handleSwitchSignal(true);
+          }
+        }
+      } catch (err) {
+        // transferIn の一時的なタイムアウト等は無視してループ継続
+        if (err.message.includes('The transfer was cancelled') || err.message.includes('error')) {
+          await new Promise(r => setTimeout(r, 100));
         }
       }
-    } catch (err) {
-      appendLog(`通信エラー: ${err.message}`);
-    } finally {
-      reader.releaseLock();
     }
   }
 
