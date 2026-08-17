@@ -61,11 +61,12 @@
       font-weight: bold;
       cursor: pointer;
       transition: opacity 0.2s;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
     }
 
     .btn:active { opacity: 0.8; }
-    .btn-connect { background-color: #f57c00; color: white; }
+    .btn-connect-usb { background-color: #f57c00; color: white; }
+    .btn-connect-hid { background-color: #7b1fa2; color: white; }
     .btn-manual-play { background-color: #0288d1; color: white; }
     .btn-manual-stop { background-color: #d32f2f; color: white; }
 
@@ -121,15 +122,8 @@
     <span id="connectionStatus" class="status-badge status-disconnected">🔴 スイッチ：未接続</span>
   </div>
 
-  <button id="connectBtn" class="btn btn-connect">🔌 スイッチ(USB)を接続する</button>
-
-  <div class="form-group">
-    <label for="baudRate">通信速度:</label>
-    <select id="baudRate">
-      <option value="9600" selected>9600 (標準)</option>
-      <option value="115200">115200</option>
-    </select>
-  </div>
+  <button id="connectUsbBtn" class="btn btn-connect-usb">🔌 WebUSBで接続する (WebBuzzer用)</button>
+  <button id="connectHidBtn" class="btn btn-connect-hid">⌨️ WebHIDで接続する (キーボード認識用)</button>
 
   <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
@@ -162,9 +156,6 @@
 </div>
 
 <script>
-  let port = null;
-  let reader = null;
-
   const bellAudio = new Audio();
   const announcementAudio = new Audio();
   
@@ -278,7 +269,6 @@
     const mode = document.getElementById('playMode').value;
 
     if (mode === 'tachikawa' || mode === 'nishiogikubo') {
-      // 押された瞬間(isON=true)のみトリガー処理
       if (isON && !lastSwitchState) {
         if (!isBellPlaying) {
           startBell();
@@ -287,7 +277,6 @@
         }
       }
     } else {
-      // 標準モード
       if (isON && !lastSwitchState) {
         startBell();
       } else if (!isON && lastSwitchState) {
@@ -298,11 +287,81 @@
     lastSwitchState = isON;
   }
 
-  // キーボードイベント監視（HIDモード機器のキー入力「1」に対応）
+  // --- 1. WebUSB 制御ロジック (WebBuzzer通信用) ---
+  document.getElementById('connectUsbBtn').addEventListener('click', async () => {
+    if (!('usb' in navigator)) {
+      alert('お使いのブラウザはWebUSBに対応していません。Android ChromeまたはChromebookをご利用ください。');
+      return;
+    }
+
+    try {
+      const device = await navigator.usb.requestDevice({ filters: [] });
+      await device.open();
+      if (device.configuration === null) await device.selectConfiguration(1);
+      await device.claimInterface(0);
+
+      const statusBadge = document.getElementById('connectionStatus');
+      statusBadge.innerText = '🟢 スイッチ：WebUSB接続完了';
+      statusBadge.className = 'status-badge status-connected';
+      appendLog(`WebUSB接続成功: ${device.productName || 'USB機器'}`);
+
+      readUsbLoop(device);
+    } catch (err) {
+      appendLog(`WebUSB接続エラー: ${err.message}`);
+    }
+  });
+
+  async function readUsbLoop(device) {
+    try {
+      while (true) {
+        const result = await device.transferIn(1, 64);
+        if (result.data && result.data.byteLength > 0) {
+          const dataView = new Uint8Array(result.data.buffer);
+          appendLog(`📡 WebUSB受信: [${Array.from(dataView).join(', ')}]`);
+          const isPressed = dataView.some(val => val > 0);
+          handleSwitchSignal(isPressed);
+        }
+      }
+    } catch (err) {
+      appendLog(`USB通信切断: ${err.message}`);
+    }
+  }
+
+  // --- 2. WebHID 制御ロジック ---
+  document.getElementById('connectHidBtn').addEventListener('click', async () => {
+    if (!('hid' in navigator)) {
+      alert('お使いのブラウザはWebHIDに対応していません。');
+      return;
+    }
+
+    try {
+      const devices = await navigator.hid.requestDevice({ filters: [] });
+      if (devices.length === 0) return;
+      
+      const device = devices[0];
+      await device.open();
+
+      const statusBadge = document.getElementById('connectionStatus');
+      statusBadge.innerText = '🟢 スイッチ：WebHID接続完了';
+      statusBadge.className = 'status-badge status-connected';
+      appendLog(`WebHID接続成功: ${device.productName || 'HID機器'}`);
+
+      device.addEventListener('inputreport', (e) => {
+        const dataView = new Uint8Array(e.data.buffer);
+        appendLog(`📡 WebHID受信: [${Array.from(dataView).join(', ')}]`);
+        const isPressed = dataView.some(val => val > 0);
+        handleSwitchSignal(isPressed);
+      });
+    } catch (err) {
+      appendLog(`WebHID接続エラー: ${err.message}`);
+    }
+  });
+
+  // --- 3. キーボード入力バックアップ ---
   window.addEventListener('keydown', (e) => {
     if (e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
       if (!e.repeat) {
-        appendLog('⌨️ キーボード/スイッチ入力 [ON]');
+        appendLog('⌨️ キー入力 [ON]');
         handleSwitchSignal(true);
       }
     }
@@ -310,67 +369,9 @@
 
   window.addEventListener('keyup', (e) => {
     if (e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
-      appendLog('⌨️ キーボード/スイッチ入力 [OFF]');
+      appendLog('⌨️ キー入力 [OFF]');
       handleSwitchSignal(false);
     }
-  });
-
-  document.getElementById('connectBtn').addEventListener('click', async () => {
-    if (!('serial' in navigator)) {
-      alert('お使いのブラウザはWeb Serial APIに対応していません。');
-      return;
-    }
-
-    const baudRate = parseInt(document.getElementById('baudRate').value, 10);
-
-    try {
-      port = await navigator.serial.requestPort();
-      await port.open({ baudRate });
-
-      const statusBadge = document.getElementById('connectionStatus');
-      statusBadge.innerText = '🟢 スイッチ：接続完了';
-      statusBadge.className = 'status-badge status-connected';
-      appendLog(`USB接続完了 (ボーレート: ${baudRate})`);
-
-      readSerialData();
-    } catch (err) {
-      appendLog(`接続エラー: ${err.message}`);
-    }
-  });
-
-  // バイナリ値 (0x01 / 0x00 / 文字列) を解釈するデータリーダー
-  async function readSerialData() {
-    const reader = port.readable.getReader();
-
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        for (let i = 0; i < value.length; i++) {
-          const byteVal = value[i];
-          const charVal = String.fromCharCode(byteVal);
-
-          // 1, 0x01, '1', 'ON' などの各種信号を検知
-          if (byteVal === 1 || charVal === '1' || charVal === 'O') {
-            appendLog(`📡 スイッチ信号受信: [ON]`);
-            handleSwitchSignal(true);
-          } else if (byteVal === 0 || charVal === '0' || charVal === 'F') {
-            appendLog(`📡 スイッチ信号受信: [OFF]`);
-            handleSwitchSignal(false);
-          }
-        }
-      }
-    } catch (err) {
-      appendLog(`通信エラー: ${err.message}`);
-    } finally {
-      reader.releaseLock();
-    }
-  }
-
-  window.addEventListener('beforeunload', async () => {
-    if (reader) await reader.cancel();
-    if (port) await port.close();
   });
 
   document.getElementById('manualPlayBtn').addEventListener('click', () => {
