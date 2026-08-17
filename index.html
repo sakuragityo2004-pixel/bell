@@ -61,12 +61,11 @@
       font-weight: bold;
       cursor: pointer;
       transition: opacity 0.2s;
-      margin-bottom: 12px;
+      margin-bottom: 16px;
     }
 
     .btn:active { opacity: 0.8; }
-    .btn-connect-usb { background-color: #f57c00; color: white; }
-    .btn-connect-hid { background-color: #7b1fa2; color: white; }
+    .btn-connect { background-color: #f57c00; color: white; }
     .btn-manual-play { background-color: #0288d1; color: white; }
     .btn-manual-stop { background-color: #d32f2f; color: white; }
 
@@ -122,8 +121,15 @@
     <span id="connectionStatus" class="status-badge status-disconnected">🔴 スイッチ：未接続</span>
   </div>
 
-  <button id="connectUsbBtn" class="btn btn-connect-usb">🔌 WebUSBで接続する (WebBuzzer用)</button>
-  <button id="connectHidBtn" class="btn btn-connect-hid">⌨️ WebHIDで接続する (キーボード認識用)</button>
+  <button id="connectBtn" class="btn btn-connect">🔌 スイッチ(USB2.0-Serial)を接続する</button>
+
+  <div class="form-group">
+    <label for="baudRate">通信速度:</label>
+    <select id="baudRate">
+      <option value="9600" selected>9600 (標準)</option>
+      <option value="115200">115200</option>
+    </select>
+  </div>
 
   <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
@@ -140,9 +146,9 @@
   <div class="form-group">
     <label for="playMode">⚙️ 再生モード (扱い方):</label>
     <select id="playMode">
-      <option value="tachikawa" selected>立川式 (1回押しで開始、もう1回で即停止＋戸閉)</option>
-      <option value="nishiogikubo">西荻窪式 (停止操作後、最後まで鳴り切ってから戸閉)</option>
-      <option value="standard">標準モード (押している間ベル＋離すと即戸閉)</option>
+      <option value="tachikawa" selected>立川式 (ONで開始、OFFで曲完奏＋同時に戸閉重畳)</option>
+      <option value="nishiogikubo">西荻窪式 (OFF操作後、曲終わりまで待ってから戸閉)</option>
+      <option value="standard">標準モード (押している間ベル＋離すと即停止・戸閉)</option>
     </select>
   </div>
 
@@ -156,11 +162,12 @@
 </div>
 
 <script>
+  let port = null;
+
   const bellAudio = new Audio();
   const announcementAudio = new Audio();
   
   let isBellPlaying = false;
-  let isWaitingForEnd = false;
   let lastSwitchState = false;
 
   function appendLog(msg) {
@@ -195,11 +202,7 @@
   bellAudio.addEventListener('ended', () => {
     isBellPlaying = false;
     bellAudio.currentTime = 0;
-    if (isWaitingForEnd) {
-      isWaitingForEnd = false;
-      appendLog('⏹️ 発車ベル再生終了');
-      playAnnouncement();
-    }
+    appendLog('⏹️ 発車ベル再生終了');
   });
 
   function playAnnouncement() {
@@ -207,7 +210,7 @@
       announcementAudio.pause();
       announcementAudio.currentTime = 0;
       announcementAudio.play().then(() => {
-        appendLog('▶️ 戸閉放送再生中...');
+        appendLog('▶️ 戸閉放送再生開始');
       }).catch(err => {
         appendLog(`❌ 放送エラー: ${err.message}`);
       });
@@ -226,11 +229,10 @@
     bellAudio.pause();
     bellAudio.currentTime = 0;
     bellAudio.loop = true;
-    isWaitingForEnd = false;
     
     bellAudio.play().then(() => {
       isBellPlaying = true;
-      appendLog('▶️ 発車ベル再生中...');
+      appendLog('▶️ 発車ベル再生開始');
     }).catch(err => {
       appendLog(`❌ 再生エラー: ${err.message}`);
     });
@@ -241,11 +243,18 @@
 
     if (!isBellPlaying) return;
 
-    if (mode === 'nishiogikubo') {
+    if (mode === 'tachikawa') {
+      // 立川式: ループを解除してメロディは最後まで流しつつ、同時に戸閉放送を開始
       bellAudio.loop = false;
-      isWaitingForEnd = true;
-      appendLog('⏳ 発車ベル停止要求（曲終わりまで再生後に戸閉）');
+      appendLog('🔔 立川式: メロディを最後まで流しつつ、戸閉放送を同時に重ねて開始');
+      playAnnouncement();
+    } else if (mode === 'nishiogikubo') {
+      // 西荻窪式: ループを解除し、曲が終わった後に戸閉放送（endedイベントで処理）
+      bellAudio.loop = false;
+      appendLog('⏳ 西荻窪式: 完奏後に戸閉放送を開始します');
+      bellAudio.addEventListener('ended', playAnnouncement, { once: true });
     } else {
+      // 標準モード: メロディは即時停止し、戸閉放送を開始
       bellAudio.pause();
       bellAudio.currentTime = 0;
       isBellPlaying = false;
@@ -260,7 +269,6 @@
     announcementAudio.pause();
     announcementAudio.currentTime = 0;
     isBellPlaying = false;
-    isWaitingForEnd = false;
     lastSwitchState = false;
     appendLog('⏹️ すべての音声を強制停止しました');
   }
@@ -287,92 +295,50 @@
     lastSwitchState = isON;
   }
 
-  // --- 1. WebUSB 制御ロジック (WebBuzzer通信用) ---
-  document.getElementById('connectUsbBtn').addEventListener('click', async () => {
-    if (!('usb' in navigator)) {
-      alert('お使いのブラウザはWebUSBに対応していません。Android ChromeまたはChromebookをご利用ください。');
+  document.getElementById('connectBtn').addEventListener('click', async () => {
+    if (!('serial' in navigator)) {
+      alert('お使いのブラウザはWeb Serial APIに対応していません。Android Chromeを利用してください。');
       return;
     }
 
+    const baudRate = parseInt(document.getElementById('baudRate').value, 10);
+
     try {
-      const device = await navigator.usb.requestDevice({ filters: [] });
-      await device.open();
-      if (device.configuration === null) await device.selectConfiguration(1);
-      await device.claimInterface(0);
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate });
 
       const statusBadge = document.getElementById('connectionStatus');
-      statusBadge.innerText = '🟢 スイッチ：WebUSB接続完了';
+      statusBadge.innerText = '🟢 スイッチ：接続完了';
       statusBadge.className = 'status-badge status-connected';
-      appendLog(`WebUSB接続成功: ${device.productName || 'USB機器'}`);
+      appendLog(`USB接続完了 (ボーレート: ${baudRate})`);
 
-      readUsbLoop(device);
+      readSerialData();
     } catch (err) {
-      appendLog(`WebUSB接続エラー: ${err.message}`);
+      appendLog(`接続エラー: ${err.message}`);
     }
   });
 
-  async function readUsbLoop(device) {
+  async function readSerialData() {
+    const reader = port.readable.getReader();
+
     try {
       while (true) {
-        const result = await device.transferIn(1, 64);
-        if (result.data && result.data.byteLength > 0) {
-          const dataView = new Uint8Array(result.data.buffer);
-          appendLog(`📡 WebUSB受信: [${Array.from(dataView).join(', ')}]`);
-          const isPressed = dataView.some(val => val > 0);
-          handleSwitchSignal(isPressed);
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        appendLog(`📡 シリアルデータ受信: [${Array.from(value).join(', ')}]`);
+
+        const hasSignal = value.some(val => val > 0);
+        if (hasSignal) {
+          handleSwitchSignal(true);
         }
       }
     } catch (err) {
-      appendLog(`USB通信切断: ${err.message}`);
+      appendLog(`通信エラー: ${err.message}`);
+    } finally {
+      reader.releaseLock();
     }
   }
-
-  // --- 2. WebHID 制御ロジック ---
-  document.getElementById('connectHidBtn').addEventListener('click', async () => {
-    if (!('hid' in navigator)) {
-      alert('お使いのブラウザはWebHIDに対応していません。');
-      return;
-    }
-
-    try {
-      const devices = await navigator.hid.requestDevice({ filters: [] });
-      if (devices.length === 0) return;
-      
-      const device = devices[0];
-      await device.open();
-
-      const statusBadge = document.getElementById('connectionStatus');
-      statusBadge.innerText = '🟢 スイッチ：WebHID接続完了';
-      statusBadge.className = 'status-badge status-connected';
-      appendLog(`WebHID接続成功: ${device.productName || 'HID機器'}`);
-
-      device.addEventListener('inputreport', (e) => {
-        const dataView = new Uint8Array(e.data.buffer);
-        appendLog(`📡 WebHID受信: [${Array.from(dataView).join(', ')}]`);
-        const isPressed = dataView.some(val => val > 0);
-        handleSwitchSignal(isPressed);
-      });
-    } catch (err) {
-      appendLog(`WebHID接続エラー: ${err.message}`);
-    }
-  });
-
-  // --- 3. キーボード入力バックアップ ---
-  window.addEventListener('keydown', (e) => {
-    if (e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
-      if (!e.repeat) {
-        appendLog('⌨️ キー入力 [ON]');
-        handleSwitchSignal(true);
-      }
-    }
-  });
-
-  window.addEventListener('keyup', (e) => {
-    if (e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
-      appendLog('⌨️ キー入力 [OFF]');
-      handleSwitchSignal(false);
-    }
-  });
 
   document.getElementById('manualPlayBtn').addEventListener('click', () => {
     const mode = document.getElementById('playMode').value;
