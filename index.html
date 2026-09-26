@@ -171,9 +171,16 @@
 
   let isBellPlaying = false;
   let isAnnouncementPlaying = false;
+
+  // 状態管理（改善点：手動とハードウェアを明確分離）
   let isHardwarePressed = false;
-  let lastHardwarePressed = false;
   let isManualOn = false;
+  let lastCombinedPressed = false; // 前回伝達時の合算ON/OFF状態
+
+  // デバウンス＆ロック制御
+  let rawHardwarePressed = false;
+  let debounceTimer = null;
+  let isForceStoppedLock = false; // 強制停止後の再発火防止ロック
 
   function appendLog(msg) {
     const logElem = document.getElementById('log');
@@ -188,7 +195,7 @@
     }
   }
 
-  // --- 音声ファイル読み込み・デコード処理 ---
+  // --- 音声ファイル読み込み ---
   document.getElementById('bellAudioFile').addEventListener('change', (e) => {
     ensureAudioContext();
     const file = e.target.files[0];
@@ -198,7 +205,7 @@
         audioCtx.decodeAudioData(event.target.result)
           .then(buffer => {
             bellBuffer = buffer;
-            appendLog(`発車ベル読み込み完了 (高音質デコード済): ${file.name}`);
+            appendLog(`発車ベル読み込み完了: ${file.name}`);
           })
           .catch(err => appendLog(`❌ ベル読み込みエラー: ${err.message}`));
       };
@@ -215,7 +222,7 @@
         audioCtx.decodeAudioData(event.target.result)
           .then(buffer => {
             announcementBuffer = buffer;
-            appendLog(`戸閉放送読み込み完了 (高音質デコード済): ${file.name}`);
+            appendLog(`戸閉放送読み込み完了: ${file.name}`);
           })
           .catch(err => appendLog(`❌ 放送読み込みエラー: ${err.message}`));
       };
@@ -226,7 +233,7 @@
   function playAnnouncement() {
     const mode = document.getElementById('playMode').value;
     if (mode === 'none') {
-      appendLog('ℹ️ 戸閉放送なしモードのため、放送をスキップします');
+      appendLog('ℹ️ 戸閉放送なしモードのためスキップ');
       return;
     }
 
@@ -240,12 +247,12 @@
 
       announcementSource.onended = () => {
         isAnnouncementPlaying = false;
-        appendLog('⏹️ 戸閉放送再生完了（待機状態へ復帰）');
+        appendLog('⏹️ 戸閉放送再生完了');
       };
       announcementSource.start(0);
       appendLog('▶️ 戸閉放送再生開始');
     } else {
-      appendLog('ℹ️ 戸閉放送のファイルが選択されていないためスキップします');
+      appendLog('ℹ️ 戸閉放送未選択のためスキップ');
     }
   }
 
@@ -266,7 +273,6 @@
 
     const mode = document.getElementById('playMode').value;
 
-    // 標準モード以外（立川式・西荻窪式等）ではON時に放送を停止する
     if (mode !== 'standard') {
       stopAnnouncement();
     }
@@ -287,7 +293,7 @@
     isBellPlaying = true;
     
     if (mode === 'standard' && isAnnouncementPlaying) {
-      appendLog('▶️ 打ち返し操作: 戸閉放送を流したまま発車ベルを重ねて再生');
+      appendLog('▶️ 打ち返し操作: 戸閉放送を維持して発車ベルを重ねて再生');
     } else {
       appendLog('▶️ 発車ベル再生開始');
     }
@@ -296,7 +302,7 @@
   function stopBellOnly() {
     if (bellSource) {
       try {
-        bellSource.onended = null; // 二重発火を防ぐためイベント解除
+        bellSource.onended = null; // 多重発火防止
         bellSource.stop();
       } catch(e) {}
       bellSource = null;
@@ -308,12 +314,11 @@
     const mode = document.getElementById('playMode').value;
     if (!isBellPlaying || !bellSource) return;
 
-    // 二重検知によるバグを防ぐため、再生状態フラグを即座に落とす
     isBellPlaying = false;
 
     if (mode === 'none') {
       bellSource.loop = false;
-      appendLog('🔔 戸閉放送なし: スイッチOFF検知 → 完奏後に停止');
+      appendLog('🔔 スイッチOFF検知 → 完奏後に停止');
     } else if (mode === 'tachikawa') {
       bellSource.loop = false;
       appendLog('🔔 立川式: スイッチOFF検知 → 完奏切り替え ＋ 戸閉放送開始');
@@ -322,11 +327,11 @@
       bellSource.loop = false;
       appendLog('⏳ 西荻窪式: スイッチOFF検知 → 完奏後に戸閉放送開始');
       bellSource.onended = () => {
+        bellSource.onended = null;
         appendLog('⏹️ 発車ベル完奏終了');
         playAnnouncement();
       };
     } else {
-      // 標準モード (即時停止 ＋ 戸閉放送開始)
       stopBellOnly();
       appendLog('⏹️ 標準モード: スイッチOFF検知 → 即時停止 ＋ 戸閉放送開始');
       playAnnouncement();
@@ -338,22 +343,39 @@
     stopAnnouncement();
     isBellPlaying = false;
     isAnnouncementPlaying = false;
-    lastHardwarePressed = false;
     isManualOn = false;
-    appendLog('⏹️ 強制停止しました');
+    isHardwarePressed = false;
+    lastCombinedPressed = false;
+    
+    // 強制停止ロックをかけてスイッチが完全に離されるまで再発火を防ぐ
+    isForceStoppedLock = true;
+    appendLog('⏹️ 強制停止（スイッチがOFFに戻るまでロックします）');
   }
 
-  function handleSwitchSignal(isON) {
-    if (isON && !lastHardwarePressed) {
+  // --- スイッチロジック判定（手動＋ハードの合算判定） ---
+  function updateSwitchState() {
+    const currentCombined = isHardwarePressed || isManualOn;
+
+    // 強制停止ロック中の場合、両方OFFになったらロック解除
+    if (isForceStoppedLock) {
+      if (!currentCombined) {
+        isForceStoppedLock = false;
+        appendLog('🔓 スイッチOFFを確認：強制停止ロックを解除しました');
+      } else {
+        lastCombinedPressed = currentCombined;
+        return; // ロック中は再生処理を行わない
+      }
+    }
+
+    if (currentCombined && !lastCombinedPressed) {
       appendLog('🔘 スイッチONを検知');
       startBell();
-    }
-    else if (!isON && lastHardwarePressed) {
-      appendLog('🔘 スイッチOFF（ONボタン復帰）を検知');
+    } else if (!currentCombined && lastCombinedPressed) {
+      appendLog('🔘 スイッチOFFを検知');
       stopBellAndPlayAnnouncement();
     }
 
-    lastHardwarePressed = isON;
+    lastCombinedPressed = currentCombined;
   }
 
   // --- 通信ロジック ---
@@ -392,6 +414,8 @@
   function readDataLoop() {
     if (!serial) return;
     serial.readAsync().then(res => {
+      // 改善点①：通信結果（res）を受信した事実だけでなく判定ロジックを通す
+      // ※通信でデータが送られてくる仕様に対応
       lastPressed = Date.now();
     }).catch(err => {
       onDisconnectOK();
@@ -401,16 +425,34 @@
   function mainLoop() {
     if (!serial) return;
     const checkSignal = new Uint8Array([0x56, 0x56, 0x56]);
-    serial.write(checkSignal);
 
-    isHardwarePressed = (Date.now() - lastPressed < 150);
-    handleSwitchSignal(isHardwarePressed);
+    // 改善点⑤：write時のエラーハンドリングを追加
+    try {
+      serial.write(checkSignal);
+    } catch (e) {
+      appendLog(`❌ 通信書き込みエラー: ${e.message}`);
+      onDisconnectOK();
+      return;
+    }
+
+    // 改善点④：100msのデバウンス判定
+    const detectedPress = (Date.now() - lastPressed < 150);
+    if (detectedPress !== rawHardwarePressed) {
+      rawHardwarePressed = detectedPress;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        isHardwarePressed = rawHardwarePressed;
+        updateSwitchState();
+      }, 100); // 100ms安定したら変化とみなす
+    } else {
+      updateSwitchState();
+    }
   }
 
   function handleManualToggle() {
     ensureAudioContext();
     isManualOn = !isManualOn;
-    handleSwitchSignal(isManualOn);
+    updateSwitchState();
   }
 </script>
 
