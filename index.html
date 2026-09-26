@@ -160,8 +160,14 @@
   let mainIntervalID, readIntervalID;
   let lastPressed = 0;
 
-  const bellAudio = new Audio();
-  const announcementAudio = new Audio();
+  // --- Web Audio API の準備 ---
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  
+  let bellBuffer = null;
+  let announcementBuffer = null;
+
+  let bellSource = null;
+  let announcementSource = null;
 
   let isBellPlaying = false;
   let isHardwarePressed = false;
@@ -175,44 +181,46 @@
     logElem.scrollTop = logElem.scrollHeight;
   }
 
-  // --- 音声ファイル選択ハンドラ ---
+  // ユーザー操作時にAudioContextを有効化
+  function ensureAudioContext() {
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+  }
+
+  // --- 音声ファイル読み込み・デコード処理 ---
   document.getElementById('bellAudioFile').addEventListener('change', (e) => {
+    ensureAudioContext();
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = () => {
-        bellAudio.pause();
-        bellAudio.src = reader.result;
-        bellAudio.load(); // ファイル読み込み時のみ事前ロードを行う
-        appendLog(`発車ベル読み込み完了: ${file.name}`);
+      reader.onload = (event) => {
+        audioCtx.decodeAudioData(event.target.result)
+          .then(buffer => {
+            bellBuffer = buffer;
+            appendLog(`発車ベル読み込み完了 (高音質デコード済): ${file.name}`);
+          })
+          .catch(err => appendLog(`❌ ベル読み込みエラー: ${err.message}`));
       };
-      reader.readAsDataURL(file);
+      reader.readAsArrayBuffer(file);
     }
   });
 
   document.getElementById('announcementAudioFile').addEventListener('change', (e) => {
+    ensureAudioContext();
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = () => {
-        announcementAudio.pause();
-        announcementAudio.src = reader.result;
-        announcementAudio.load();
-        appendLog(`戸閉放送読み込み完了: ${file.name}`);
+      reader.onload = (event) => {
+        audioCtx.decodeAudioData(event.target.result)
+          .then(buffer => {
+            announcementBuffer = buffer;
+            appendLog(`戸閉放送読み込み完了 (高音質デコード済): ${file.name}`);
+          })
+          .catch(err => appendLog(`❌ 放送読み込みエラー: ${err.message}`));
       };
-      reader.readAsDataURL(file);
+      reader.readAsArrayBuffer(file);
     }
-  });
-
-  bellAudio.addEventListener('ended', () => {
-    isBellPlaying = false;
-    bellAudio.currentTime = 0;
-    appendLog('⏹️ 発車ベル完奏終了');
-  });
-
-  announcementAudio.addEventListener('ended', () => {
-    announcementAudio.currentTime = 0;
-    appendLog('⏹️ 戸閉放送再生完了（待機状態へ復帰）');
   });
 
   function playAnnouncement() {
@@ -222,65 +230,91 @@
       return;
     }
 
-    if (announcementAudio.src) {
-      announcementAudio.pause();
-      announcementAudio.currentTime = 0;
-      announcementAudio.play().then(() => {
-        appendLog('▶️ 戸閉放送再生開始');
-      }).catch(err => appendLog(`❌ 放送エラー: ${err.message}`));
+    if (announcementBuffer) {
+      stopAnnouncement();
+      announcementSource = audioCtx.createBufferSource();
+      announcementSource.buffer = announcementBuffer;
+      announcementSource.connect(audioCtx.destination);
+      announcementSource.onended = () => {
+        appendLog('⏹️ 戸閉放送再生完了（待機状態へ復帰）');
+      };
+      announcementSource.start(0);
+      appendLog('▶️ 戸閉放送再生開始');
     } else {
       appendLog('ℹ️ 戸閉放送のファイルが選択されていないためスキップします');
     }
   }
 
+  function stopAnnouncement() {
+    if (announcementSource) {
+      try { announcementSource.stop(); } catch(e) {}
+      announcementSource = null;
+    }
+  }
+
   function startBell() {
-    if (!bellAudio.src) {
+    ensureAudioContext();
+    if (!bellBuffer) {
       appendLog('⚠️ 警告: 発車ベルの音声ファイルが未選択です');
       return;
     }
-    announcementAudio.pause();
-    announcementAudio.currentTime = 0;
 
-    bellAudio.pause();
-    bellAudio.currentTime = 0;
-    bellAudio.loop = true;
+    stopAnnouncement();
+    stopBellOnly();
 
-    // 再生直前の load() を削除し、即座に play() を実行
-    bellAudio.play().then(() => {
-      isBellPlaying = true;
-      appendLog('▶️ 発車ベル再生開始');
-    }).catch(err => appendLog(`❌ ベルエラー: ${err.message}`));
+    bellSource = audioCtx.createBufferSource();
+    bellSource.buffer = bellBuffer;
+    bellSource.loop = true;
+    bellSource.connect(audioCtx.destination);
+
+    bellSource.onended = () => {
+      isBellPlaying = false;
+      appendLog('⏹️ 発車ベル完奏終了');
+    };
+
+    // 0秒ラグなしで即時再生開始
+    bellSource.start(0);
+    isBellPlaying = true;
+    appendLog('▶️ 発車ベル再生開始');
+  }
+
+  function stopBellOnly() {
+    if (bellSource) {
+      try { bellSource.stop(); } catch(e) {}
+      bellSource = null;
+    }
+    isBellPlaying = false;
   }
 
   function stopBellAndPlayAnnouncement() {
     const mode = document.getElementById('playMode').value;
-    if (!isBellPlaying) return;
+    if (!isBellPlaying || !bellSource) return;
 
     if (mode === 'none') {
-      bellAudio.loop = false;
+      bellSource.loop = false; // ループを解除し完奏させる
       appendLog('🔔 戸閉放送なし: スイッチOFF検知 → 完奏後に停止');
     } else if (mode === 'tachikawa') {
-      bellAudio.loop = false;
+      bellSource.loop = false; // ベルは完奏へ
       appendLog('🔔 立川式: スイッチOFF検知 → 完奏切り替え ＋ 戸閉放送開始');
       playAnnouncement();
     } else if (mode === 'nishiogikubo') {
-      bellAudio.loop = false;
+      bellSource.loop = false; // ベルは完奏へ
       appendLog('⏳ 西荻窪式: スイッチOFF検知 → 完奏後に戸閉放送開始');
-      bellAudio.addEventListener('ended', playAnnouncement, { once: true });
+      bellSource.onended = () => {
+        isBellPlaying = false;
+        appendLog('⏹️ 発車ベル完奏終了');
+        playAnnouncement();
+      };
     } else {
-      bellAudio.pause();
-      bellAudio.currentTime = 0;
-      isBellPlaying = false;
+      stopBellOnly();
       appendLog('⏹️ 標準モード: スイッチOFF検知 → 即時停止 ＋ 戸閉放送開始');
       playAnnouncement();
     }
   }
 
   function forceStopAll() {
-    bellAudio.pause();
-    bellAudio.currentTime = 0;
-    announcementAudio.pause();
-    announcementAudio.currentTime = 0;
+    stopBellOnly();
+    stopAnnouncement();
     isBellPlaying = false;
     lastHardwarePressed = false;
     isManualOn = false;
@@ -302,6 +336,7 @@
 
   // --- 通信ロジック ---
   function connectToDevice() {
+    ensureAudioContext();
     const filters = [{ 'vendorId': 0x1a86 }];
     navigator.usb.requestDevice({ 'filters': filters }).then(device => {
       serial = new TibboWebSerial.Serial(device, { 'encoding': 'UTF8', 'autoReadData': false });
@@ -351,6 +386,7 @@
   }
 
   function handleManualToggle() {
+    ensureAudioContext();
     isManualOn = !isManualOn;
     handleSwitchSignal(isManualOn);
   }
