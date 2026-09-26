@@ -141,7 +141,7 @@
     <select id="playMode">
       <option value="tachikawa" selected>立川式 (ONで開始 → OFFで戻った時に完奏＋戸閉)</option>
       <option value="nishiogikubo">西荻窪式 (ONで開始 → OFFで戻った時に完奏後に戸閉)</option>
-      <option value="standard">標準モード (ONで開始 → OFFで即時停止＋戸閉)</option>
+      <option value="standard">標準モード (ONで開始 → OFFで即時停止＋戸閉/打ち返し対応)</option>
       <option value="none">戸閉放送なし (ベルのみ/スイッチOFFで完奏のみ)</option>
     </select>
   </div>
@@ -170,6 +170,7 @@
   let announcementSource = null;
 
   let isBellPlaying = false;
+  let isAnnouncementPlaying = false;
   let isHardwarePressed = false;
   let lastHardwarePressed = false;
   let isManualOn = false;
@@ -181,7 +182,6 @@
     logElem.scrollTop = logElem.scrollHeight;
   }
 
-  // ユーザー操作時にAudioContextを有効化
   function ensureAudioContext() {
     if (audioCtx.state === 'suspended') {
       audioCtx.resume();
@@ -235,7 +235,11 @@
       announcementSource = audioCtx.createBufferSource();
       announcementSource.buffer = announcementBuffer;
       announcementSource.connect(audioCtx.destination);
+      
+      isAnnouncementPlaying = true;
+
       announcementSource.onended = () => {
+        isAnnouncementPlaying = false;
         appendLog('⏹️ 戸閉放送再生完了（待機状態へ復帰）');
       };
       announcementSource.start(0);
@@ -250,6 +254,7 @@
       try { announcementSource.stop(); } catch(e) {}
       announcementSource = null;
     }
+    isAnnouncementPlaying = false;
   }
 
   function startBell() {
@@ -259,7 +264,14 @@
       return;
     }
 
-    stopAnnouncement();
+    const mode = document.getElementById('playMode').value;
+
+    // 標準モード以外（立川式・西荻窪式等）ではON時に放送を停止する
+    // 標準モード（打ち返し対応）の場合は放送をそのまま流し続ける
+    if (mode !== 'standard') {
+      stopAnnouncement();
+    }
+
     stopBellOnly();
 
     bellSource = audioCtx.createBufferSource();
@@ -272,10 +284,14 @@
       appendLog('⏹️ 発車ベル完奏終了');
     };
 
-    // 0秒ラグなしで即時再生開始
     bellSource.start(0);
     isBellPlaying = true;
-    appendLog('▶️ 発車ベル再生開始');
+    
+    if (mode === 'standard' && isAnnouncementPlaying) {
+      appendLog('▶️ 打ち返し操作: 戸閉放送を流したまま発車ベルを重ねて再生');
+    } else {
+      appendLog('▶️ 発車ベル再生開始');
+    }
   }
 
   function stopBellOnly() {
@@ -291,14 +307,14 @@
     if (!isBellPlaying || !bellSource) return;
 
     if (mode === 'none') {
-      bellSource.loop = false; // ループを解除し完奏させる
+      bellSource.loop = false;
       appendLog('🔔 戸閉放送なし: スイッチOFF検知 → 完奏後に停止');
     } else if (mode === 'tachikawa') {
-      bellSource.loop = false; // ベルは完奏へ
+      bellSource.loop = false;
       appendLog('🔔 立川式: スイッチOFF検知 → 完奏切り替え ＋ 戸閉放送開始');
       playAnnouncement();
     } else if (mode === 'nishiogikubo') {
-      bellSource.loop = false; // ベルは完奏へ
+      bellSource.loop = false;
       appendLog('⏳ 西荻窪式: スイッチOFF検知 → 完奏後に戸閉放送開始');
       bellSource.onended = () => {
         isBellPlaying = false;
@@ -306,6 +322,7 @@
         playAnnouncement();
       };
     } else {
+      // 標準モード (即時停止 ＋ 戸閉放送開始)
       stopBellOnly();
       appendLog('⏹️ 標準モード: スイッチOFF検知 → 即時停止 ＋ 戸閉放送開始');
       playAnnouncement();
@@ -316,6 +333,7 @@
     stopBellOnly();
     stopAnnouncement();
     isBellPlaying = false;
+    isAnnouncementPlaying = false;
     lastHardwarePressed = false;
     isManualOn = false;
     appendLog('⏹️ 強制停止しました');
