@@ -183,7 +183,7 @@
       reader.onload = () => {
         bellAudio.pause();
         bellAudio.src = reader.result;
-        bellAudio.load(); // 事前ロードで頭欠け防止
+        bellAudio.load(); // ファイル読み込み時のみ事前ロードを行う
         appendLog(`発車ベル読み込み完了: ${file.name}`);
       };
       reader.readAsDataURL(file);
@@ -245,9 +245,7 @@
     bellAudio.currentTime = 0;
     bellAudio.loop = true;
 
-    // 再生直前のロード処理（復元遅延による頭欠けを防止）
-    bellAudio.load();
-
+    // 再生直前の load() を削除し、即座に play() を実行
     bellAudio.play().then(() => {
       isBellPlaying = true;
       appendLog('▶️ 発車ベル再生開始');
