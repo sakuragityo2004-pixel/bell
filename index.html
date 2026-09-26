@@ -267,7 +267,6 @@
     const mode = document.getElementById('playMode').value;
 
     // 標準モード以外（立川式・西荻窪式等）ではON時に放送を停止する
-    // 標準モード（打ち返し対応）の場合は放送をそのまま流し続ける
     if (mode !== 'standard') {
       stopAnnouncement();
     }
@@ -296,7 +295,10 @@
 
   function stopBellOnly() {
     if (bellSource) {
-      try { bellSource.stop(); } catch(e) {}
+      try {
+        bellSource.onended = null; // 二重発火を防ぐためイベント解除
+        bellSource.stop();
+      } catch(e) {}
       bellSource = null;
     }
     isBellPlaying = false;
@@ -305,6 +307,9 @@
   function stopBellAndPlayAnnouncement() {
     const mode = document.getElementById('playMode').value;
     if (!isBellPlaying || !bellSource) return;
+
+    // 二重検知によるバグを防ぐため、再生状態フラグを即座に落とす
+    isBellPlaying = false;
 
     if (mode === 'none') {
       bellSource.loop = false;
@@ -317,7 +322,6 @@
       bellSource.loop = false;
       appendLog('⏳ 西荻窪式: スイッチOFF検知 → 完奏後に戸閉放送開始');
       bellSource.onended = () => {
-        isBellPlaying = false;
         appendLog('⏹️ 発車ベル完奏終了');
         playAnnouncement();
       };
