@@ -183,6 +183,7 @@
       reader.onload = () => {
         bellAudio.pause();
         bellAudio.src = reader.result;
+        bellAudio.load(); // 事前ロードで頭欠け防止
         appendLog(`発車ベル読み込み完了: ${file.name}`);
       };
       reader.readAsDataURL(file);
@@ -196,6 +197,7 @@
       reader.onload = () => {
         announcementAudio.pause();
         announcementAudio.src = reader.result;
+        announcementAudio.load();
         appendLog(`戸閉放送読み込み完了: ${file.name}`);
       };
       reader.readAsDataURL(file);
@@ -242,6 +244,9 @@
     bellAudio.pause();
     bellAudio.currentTime = 0;
     bellAudio.loop = true;
+
+    // 再生直前のロード処理（復元遅延による頭欠けを防止）
+    bellAudio.load();
 
     bellAudio.play().then(() => {
       isBellPlaying = true;
